@@ -3,19 +3,24 @@ import pandas as pd
 import sqlite3
 import datetime
 import plotly.express as px
+import numpy as np
 
 # --- 配置与数据初始化 ---
 DB_FILE = 'crm_data.db'
+DAYS_FOR_TRANSFER = 20 # 定义超期天数：超过20天未更新状态或未跟进，即视为超期
 
-# 1. 用户账号配置 (已包含您的定制账号 zhaoxiaoan)
+# 1. 用户账号配置 (已添加新用户)
 USERS = {
-    'admin': {'password': 'admin123', 'role': 'admin'},      # 默认管理员
-    'sales1': {'password': '123', 'role': 'user'},           # 默认普通用户
-    'sales2': {'password': '123', 'role': 'user'},
-    'zhaoxiaoan': {'password': 'zhaoxiaoan123', 'role': 'admin'}, # 您的自定义账号
+    'admin': {'password': 'admin123', 'role': 'admin'},
+    'zhaoxiaoan': {'password': 'zhaoxiaoan123', 'role': 'admin'}, # 您的自定义管理员账号
+    
+    # 新增的普通用户
+    'liqiufang': {'password': '123', 'role': 'user'}, 
+    'fanqiuju': {'password': '123', 'role': 'user'},
+    'zhoumengke': {'password': '123', 'role': 'user'},
 }
 
-# 2. 下拉选项配置 (已更新应用场地和店铺名字)
+# 2. 下拉选项配置 (保持不变)
 SITE_OPTIONS = [
     # 1. 专业体育场馆
     "篮球馆（FIBA认证场地）", "排球馆", "羽毛球馆", "乒乓球馆", 
@@ -43,7 +48,7 @@ INTENT_OPTIONS = ["高", "中", "低", "已成交", "流失"]
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # 创建表，包含所有字段
+    # 包含所有字段 + 跟进日期字段
     c.execute('''CREATE TABLE IF NOT EXISTS sales (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         date TEXT,
@@ -61,7 +66,9 @@ def init_db():
         total_amount REAL,
         remarks TEXT,
         sample_no TEXT,
-        order_no TEXT
+        order_no TEXT,
+        last_follow_up_date TEXT, 
+        next_follow_up_date TEXT   
     )''')
     conn.commit()
     conn.close()
@@ -72,8 +79,9 @@ def add_data(data):
     c.execute('''INSERT INTO sales (
         date, sales_rep, customer_name, shop_name, unit_price, area, 
         site_type, status, is_construction, construction_fee, material_fee, 
-        purchase_intent, total_amount, remarks, sample_no, order_no
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', data)
+        purchase_intent, total_amount, remarks, sample_no, order_no,
+        last_follow_up_date, next_follow_up_date 
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', data)
     conn.commit()
     conn.close()
 
@@ -90,7 +98,17 @@ def delete_data(record_id):
     conn.commit()
     conn.close()
 
-# --- 登录逻辑 ---
+# 新增：更新对接人函数 (用于管理员接管)
+def transfer_sales_rep(record_id, new_rep):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("UPDATE sales SET sales_rep=?, status='转交管理', last_follow_up_date=? WHERE id=?", 
+              (new_rep, datetime.date.today().isoformat(), record_id))
+    conn.commit()
+    conn.close()
+    return True
+
+# --- 登录逻辑 (保持不变) ---
 def check_password():
     """验证用户登录并设置 session 状态"""
     def password_entered():
@@ -99,19 +117,17 @@ def check_password():
             st.session_state["password_correct"] = True
             st.session_state["role"] = USERS[st.session_state["username"]]['role']
             st.session_state["user_now"] = st.session_state["username"]
-            del st.session_state["password"]  # 不存储密码
+            del st.session_state["password"]
         else:
             st.session_state["password_correct"] = False
 
     if "password_correct" not in st.session_state:
-        # 初始状态，显示登录界面
         st.header("🏢 CRM 系统登录")
         st.text_input("用户名", key="username")
         st.text_input("密码", type="password", key="password")
         st.button("登录", on_click=password_entered)
         return False
     elif not st.session_state["password_correct"]:
-        # 密码错误，显示登录界面和错误信息
         st.header("🏢 CRM 系统登录")
         st.text_input("用户名", key="username")
         st.text_input("密码", type="password", key="password")
@@ -119,7 +135,6 @@ def check_password():
         st.error("用户不存在或密码错误")
         return False
     else:
-        # 登录成功
         return True
 
 # --- 主程序 ---
@@ -134,7 +149,7 @@ def main():
         # 侧边栏导航
         st.sidebar.title(f"🎉 欢迎, {current_user}")
         if user_role == 'admin':
-             st.sidebar.caption("当前权限：管理员 (可删除数据)")
+             st.sidebar.caption("当前权限：管理员 (可删除/接管)")
         else:
              st.sidebar.caption("当前权限：普通销售 (仅录入/查看)")
              
@@ -143,7 +158,7 @@ def main():
         choice = st.sidebar.radio("导航菜单", menu)
         st.sidebar.markdown("---")
 
-        # 1. 新增记录页面
+        # 1. 新增记录页面 (省略，保持不变)
         if choice == "📝 新增销售记录":
             st.subheader("客户信息录入")
             with st.form("entry_form", clear_on_submit=True):
@@ -151,9 +166,7 @@ def main():
                 with col1:
                     date_val = st.date_input("日期", datetime.date.today())
                     customer_name = st.text_input("客户名称")
-                    # 使用更新后的店铺选项
                     shop_name = st.selectbox("店铺名字", SHOP_OPTIONS)
-                    # 使用更新后的应用场地选项
                     site_type = st.selectbox("应用场地", SITE_OPTIONS)
                 
                 with col2:
@@ -166,20 +179,22 @@ def main():
                     mat_fee = st.number_input("辅料费用 (元)", min_value=0.0, step=50.0)
                     purchase_intent = st.selectbox("购买意向", INTENT_OPTIONS)
                     status = st.selectbox("跟踪进度", STATUS_OPTIONS)
-                    # 对接人自动锁定为当前登录用户
                     sales_rep_input = st.text_input("对接人", value=current_user, disabled=True)
 
-                # 预估总金额计算
-                calc_total_preview = (unit_price * area) + const_fee + mat_fee
-                st.markdown(f"**💰 预估总金额 (元)：** `{calc_total_preview:,.2f}`")
-
                 st.markdown("---")
-                col4, col5 = st.columns(2)
+                st.markdown("##### 📅 跟进与备注信息")
+                col4, col5, col6 = st.columns(3)
                 with col4:
                     sample_no = st.text_input("寄样单号")
                     order_no = st.text_input("订单号")
                 with col5:
+                    last_fup = st.date_input("🗓️ 上次跟进日期", datetime.date.today())
+                    next_fup = st.date_input("🚨 计划下次跟进日期", datetime.date.today() + datetime.timedelta(days=7))
+                with col6:
                     remarks = st.text_area("备注信息")
+
+                calc_total_preview = (unit_price * area) + const_fee + mat_fee
+                st.markdown(f"**💰 预估总金额 (元)：** `{calc_total_preview:,.2f}`")
 
                 submitted = st.form_submit_button("✅ 提交录入")
 
@@ -187,23 +202,90 @@ def main():
                     if customer_name == "":
                         st.warning("⚠️ 请填写客户名称！")
                     else:
-                        # 提交时重新计算并写入数据库
                         calc_total = (unit_price * area) + const_fee + mat_fee
                         data_tuple = (
                             date_val, current_user, customer_name, shop_name, unit_price, area,
                             site_type, status, is_const, const_fee, mat_fee,
-                            purchase_intent, calc_total, remarks, sample_no, order_no
+                            purchase_intent, calc_total, remarks, sample_no, order_no,
+                            str(last_fup), str(next_fup)
                         )
                         add_data(data_tuple)
                         st.success(f"🎉 客户 **{customer_name}** 录入成功！总金额: **{calc_total:,.2f}** 元")
 
-        # 2. 数据查看页面
+        # 2. 数据查看页面 (核心修改区域)
         elif choice == "📊 数据追踪与查看":
             st.subheader("客户追踪列表")
             df = get_data()
             
-            # 搜索/过滤功能
-            st.markdown("---")
+            # --- 数据准备：日期转换与超期计算 ---
+            if not df.empty:
+                df['next_follow_up_date'] = pd.to_datetime(df['next_follow_up_date'], errors='coerce')
+                df['last_follow_up_date'] = pd.to_datetime(df['last_follow_up_date'], errors='coerce')
+                today = datetime.date.today()
+                
+                # 计算距离上次跟进的天数
+                df['days_since_fup'] = (pd.to_datetime(today) - df['last_follow_up_date']).dt.days
+                
+                # 筛选出超期客户：未完结，且距离上次跟进超过 DAYS_FOR_TRANSFER 天
+                overdue_clients = df[
+                    (df['status'] != '已完结/已收款') & 
+                    (df['days_since_fup'] > DAYS_FOR_TRANSFER)
+                ]
+
+            # --- 🚨 顶部提醒功能 ---
+            if not df.empty:
+                # 1. 超期转交提醒 (仅管理员可见)
+                if user_role == 'admin' and not overdue_clients.empty:
+                    st.error(f"⚠️ 超期客户预警！有 **{len(overdue_clients)}** 个客户已超 {DAYS_FOR_TRANSFER} 天未跟进，需转交。")
+                    
+                    # 显示超期客户列表
+                    overdue_display = overdue_clients[['id', 'customer_name', 'sales_rep', 'status', 'days_since_fup']].copy()
+                    overdue_display = overdue_display.rename(columns={'days_since_fup': f'未跟进天数(>{DAYS_FOR_TRANSFER}天)'})
+                    st.dataframe(overdue_display, hide_index=True, use_container_width=True)
+                    
+                    # 管理员转交操作
+                    st.markdown("##### 📥 客户转交管理")
+                    col_trans, col_btn = st.columns([1, 1])
+                    with col_trans:
+                        transfer_id = st.number_input("输入要转交给 admin 的客户 ID", min_value=0, step=1, key="trans_id")
+                    with col_btn:
+                        st.markdown("<br>", unsafe_allow_html=True) # 垂直对齐
+                        if st.button("🔥 确认接管 (转为 admin 负责)"):
+                            if transfer_id > 0 and transfer_id in overdue_clients['id'].values:
+                                transfer_sales_rep(transfer_id, 'admin')
+                                st.success(f"客户 ID {transfer_id} 已成功转交给 admin。")
+                                st.rerun()
+                            else:
+                                st.warning("请检查输入的 ID 是否在超期列表中。")
+                    st.markdown("---")
+
+
+                # 2. 计划跟进提醒 (所有用户可见)
+                if 'next_follow_up_date' in df.columns:
+                    # 筛选出需要今天或今天之前跟进，且状态不是“已完结”的客户
+                    reminders = df[
+                        (df['next_follow_up_date'].dt.date <= today) & 
+                        (df['status'] != '已完结/已收款') &
+                        (df['sales_rep'] == current_user) # 仅提醒当前用户自己的客户
+                    ]
+                    
+                    if not reminders.empty:
+                        st.warning(f"🔔 **{current_user}**，您有 **{len(reminders)}** 个客户需要跟进！")
+                        reminders_display = reminders[['id', 'customer_name', 'status', 'next_follow_up_date']].copy()
+                        
+                        st.dataframe(
+                            reminders_display, 
+                            hide_index=True, 
+                            use_container_width=True,
+                            column_config={
+                                "next_follow_up_date": st.column_config.DatetimeColumn("🚨 计划跟进日期", format="YYYY-MM-DD")
+                            }
+                        )
+            
+            st.markdown("---") # 分割提醒和主要表格
+            
+            # --- 主要数据表格 (搜索/过滤功能) ---
+            # ... (代码省略，保持不变)
             col_filter, col_search = st.columns([1, 2])
             
             with col_filter:
@@ -218,39 +300,36 @@ def main():
             
             if search_term:
                 df_filtered = df_filtered[
-                    df_filtered['customer_name'].str.contains(search_term, case=False) |
-                    df_filtered['shop_name'].str.contains(search_term, case=False) |
+                    df_filtered['customer_name'].astype(str).str.contains(search_term, case=False) |
+                    df_filtered['shop_name'].astype(str).str.contains(search_term, case=False) |
                     df_filtered['order_no'].astype(str).str.contains(search_term, case=False)
                 ]
 
-            # 展示数据
             st.dataframe(df_filtered, use_container_width=True, hide_index=True)
 
-            # 管理员特权：删除数据
+            # --- 管理员删除操作 (保持不变) ---
             if user_role == 'admin':
-                st.markdown("### ⚠️ 管理员操作区")
+                st.markdown("### 🗑️ 管理员数据删除")
                 col_del, _ = st.columns([1, 3])
                 with col_del:
-                    del_id = st.number_input("输入要删除的记录 ID", min_value=0, step=1, help="请查看表格第一列的 ID")
+                    del_id = st.number_input("输入要删除的记录 ID", min_value=0, step=1, help="请查看表格第一列的 ID", key="del_id")
                     if st.button("🔴 永久删除记录"):
                         delete_data(del_id)
                         st.success(f"ID {del_id} 记录已删除。")
                         st.rerun()
             else:
-                st.info("💡 普通用户仅可查看和新增，如需修改/删除请联系管理员。")
-
-        # 3. 分析页面
+                st.info("💡 普通用户仅可查看和新增，如需修改/删除/接管请联系管理员。")
+        
+        # 3. 分析页面 (保持不变)
         elif choice == "📈 销售分析看板":
             st.subheader("销售数据分析")
             df = get_data()
             if not df.empty:
-                # 数据类型转换，确保能计算
                 df['total_amount'] = pd.to_numeric(df['total_amount'], errors='coerce').fillna(0)
                 
-                # 关键指标卡片
                 total_sales = df['total_amount'].sum()
                 total_orders = len(df)
-                avg_order = df['total_amount'].mean() 
+                avg_order = df['total_amount'].replace(0, np.nan).mean()
 
                 c1, c2, c3 = st.columns(3)
                 c1.metric("💰 累计销售总额", f"¥{total_sales:,.2f}")
@@ -259,7 +338,6 @@ def main():
 
                 st.markdown("---")
                 
-                # 图表区
                 col_chart1, col_chart2 = st.columns(2)
                 
                 with col_chart1:
