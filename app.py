@@ -3,6 +3,7 @@ import pandas as pd
 import sqlite3
 import datetime
 import plotly.express as px
+import plotly.graph_objects as go
 import numpy as np
 import io
 
@@ -12,7 +13,7 @@ PROMO_DB_FILE = 'promo_data.db'
 USER_DB_FILE = 'user_management.db'
 DAYS_FOR_TRANSFER = 20 
 
-# 1. 初始用户账号配置 (只用于第一次数据库初始化)
+# 1. 初始用户账号配置
 INITIAL_USERS = {
     'admin': {'password': 'admin123', 'role': 'admin', 'display_name': '超级管理员'},
     'zhaoxiaoan': {'password': 'zhaoxiaoan123', 'role': 'admin', 'display_name': '赵小安'},
@@ -32,13 +33,8 @@ SITE_OPTIONS = [
 SHOP_OPTIONS = ["天猫旗舰店", "拼多多运动店铺", "拼多多旗舰店", "淘宝店铺", "抖音店铺", "线下渠道/其他"]
 STATUS_OPTIONS = ["初次接触", "已寄样", "报价中", "合同流程", "施工中", "已完结/已收款", "流失/搁置"]
 INTENT_OPTIONS = ["高", "中", "低", "已成交", "流失"]
-
-# --- 修改点 1: 更新客户来源 ---
 SOURCE_OPTIONS = ["自然进店", "拼多多推广", "天猫推广", "老客户转介绍", "其他"]
-
-# 推广类型
 PROMO_TYPE_OPTIONS = ["成交收费", "成交加扣", "其他"]
-
 
 # --- 数据库函数 (用户管理) ---
 def init_user_db():
@@ -95,7 +91,6 @@ def get_user_map():
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # --- 修改点 2: 增加 shipping_fee (运费) ---
     c.execute('''CREATE TABLE IF NOT EXISTS sales (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         date TEXT,
@@ -111,7 +106,7 @@ def init_db():
         is_construction TEXT,
         construction_fee REAL,
         material_fee REAL,
-        shipping_fee REAL,       -- 新增：运费
+        shipping_fee REAL,
         purchase_intent TEXT,
         total_amount REAL,
         follow_up_history TEXT,  
@@ -155,7 +150,6 @@ def get_single_record(record_id):
 def admin_update_data(record_id, data):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # 重新计算总金额 (包含运费)
     total_amount = (data['unit_price'] * data['area']) + data['construction_fee'] + data['material_fee'] + data['shipping_fee']
     
     c.execute('''UPDATE sales SET
@@ -213,25 +207,24 @@ def check_customer_exist(name, phone):
     conn.close()
     return result[0] if result else None
 
-# --- 数据库函数 (推广数据 - 结构大改) ---
+# --- 数据库函数 (推广数据) ---
 def init_promo_db():
     conn = sqlite3.connect(PROMO_DB_FILE)
     c = conn.cursor()
-    # --- 修改点 3: 完全匹配用户要求的字段 ---
     c.execute('''CREATE TABLE IF NOT EXISTS promotions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        month TEXT,                   -- 年月
-        shop TEXT,                    -- 店铺
-        promo_type TEXT,              -- 推广类型
-        total_spend REAL,             -- 总花费
-        trans_spend REAL,             -- 成交花费
-        net_gmv REAL,                 -- 净成交额
-        net_roi REAL,                 -- 净投产比
-        cpa_net REAL,                 -- 每笔净成交花费
-        inquiry_count INTEGER,        -- 询单量
-        inquiry_spend REAL,           -- 询单花费
-        cpl REAL,                     -- 询单成本 (Cost Per Lead)
-        note TEXT                     -- 备注及优化建议
+        month TEXT,
+        shop TEXT,
+        promo_type TEXT,
+        total_spend REAL,
+        trans_spend REAL,
+        net_gmv REAL,
+        net_roi REAL,
+        cpa_net REAL,
+        inquiry_count INTEGER,
+        inquiry_spend REAL,
+        cpl REAL,
+        note TEXT
     )''')
     conn.commit()
     conn.close()
@@ -307,7 +300,6 @@ def main():
             if not df_export.empty:
                 df_export['sales_rep'] = df_export['sales_rep'].map(user_map).fillna(df_export['sales_rep'])
                 output = io.BytesIO()
-                # 重新计算 total_amount (含运费)
                 df_export['total_amount'] = (df_export['unit_price'] * df_export['area']) + df_export['construction_fee'] + df_export['material_fee'] + df_export['shipping_fee']
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                     df_export.to_excel(writer, index=False, sheet_name='Sheet1')
@@ -328,7 +320,7 @@ def main():
                 st.sidebar.warning("暂无推广数据")
 
 
-        # 1. 新增记录页面 (CRM)
+        # 1. 新增记录页面
         if choice == "📝 新增销售记录":
              st.subheader("📝 客户信息录入")
              with st.form("entry_form", clear_on_submit=True):
@@ -337,7 +329,6 @@ def main():
                      date_val = st.date_input("日期", datetime.date.today())
                      customer_name = st.text_input("客户名称 (必填)")
                      phone = st.text_input("联系电话 (用于查重)")
-                     # 使用新来源选项
                      source = st.selectbox("客户来源", SOURCE_OPTIONS)
                  
                  with col2:
@@ -350,7 +341,6 @@ def main():
                      is_const = st.selectbox("是否施工", ["否", "是"])
                      const_fee = st.number_input("施工费 (元)", min_value=0.0, step=100.0)
                      mat_fee = st.number_input("辅料费用 (元)", min_value=0.0, step=50.0)
-                     # 修改点 4: 新增运费录入
                      shipping_fee = st.number_input("运费 (元)", min_value=0.0, step=10.0)
                      st.text_input("对接人", value=current_display_name, disabled=True)
 
@@ -366,7 +356,6 @@ def main():
                      next_fup = st.date_input("🚨 计划下次跟进", datetime.date.today() + datetime.timedelta(days=3))
                      first_remark = st.text_area("首次沟通记录")
                  
-                 # 预估总价展示
                  preview_total = (unit_price * area) + const_fee + mat_fee + shipping_fee
                  st.caption(f"💰 预估总金额（含运费）：{preview_total:,.2f} 元")
 
@@ -394,7 +383,7 @@ def main():
                              st.success(f"🎉 客户 {customer_name} 录入成功！")
 
 
-        # 2. 数据查看页面 (CRM)
+        # 2. 数据查看页面
         elif choice == "📊 数据追踪与查看":
              st.subheader("📋 客户追踪列表")
              df = get_data()
@@ -495,7 +484,6 @@ def main():
 
                  df_show['sales_rep'] = df_show['sales_rep'].map(user_map).fillna(df_show['sales_rep'])
                  
-                 # 显示表格：包含运费列
                  st.dataframe(
                      df_show.drop(columns=['year_month']),
                      hide_index=True, 
@@ -503,6 +491,7 @@ def main():
                      column_config={
                          "sales_rep": st.column_config.TextColumn("👤 对接人"),
                          "shipping_fee": st.column_config.NumberColumn("运费(元)", format="%.2f"),
+                         "area": st.column_config.NumberColumn("平方数(㎡)", format="%.2f"),
                          "follow_up_history": st.column_config.TextColumn("📜 跟进历史", width="large"),
                          "last_follow_up_date": st.column_config.DateColumn("上次跟进"),
                          "next_follow_up_date": st.column_config.DateColumn("计划下次"),
@@ -558,7 +547,6 @@ def main():
                                      nic = st.selectbox("施工", ["否","是"], index=["否","是"].index(record['is_construction']))
                                      ncf = st.number_input("施工费", record['construction_fee'])
                                      nmf = st.number_input("辅料费", record['material_fee'])
-                                     # 管理员也能修改运费
                                      nsf = st.number_input("运费", record.get('shipping_fee', 0.0))
                                      
                                      if st.form_submit_button("更新"):
@@ -574,40 +562,128 @@ def main():
                                          st.success("已更新")
                                          st.rerun()
 
-        # 3. 销售分析页面 (CRM)
+        # 3. 销售分析页面 (CRM - 面积深度分析版 - 新增龙虎榜)
         elif choice == "📈 销售分析看板":
             st.subheader("📊 经营数据大屏")
+            
+            # 侧边栏：目标设定
+            st.sidebar.markdown("---")
+            target_revenue = st.sidebar.number_input("🎯 本月业绩目标 (元)", min_value=10000, value=100000, step=5000)
+            
             df = get_data()
             if not df.empty:
                 df['total_amount'] = pd.to_numeric(df['total_amount'], errors='coerce').fillna(0)
+                df['shipping_fee'] = pd.to_numeric(df['shipping_fee'], errors='coerce').fillna(0)
+                df['construction_fee'] = pd.to_numeric(df['construction_fee'], errors='coerce').fillna(0)
+                df['material_fee'] = pd.to_numeric(df['material_fee'], errors='coerce').fillna(0)
+                df['area'] = pd.to_numeric(df['area'], errors='coerce').fillna(0)
                 
-                c1, c2, c3, c4 = st.columns(4)
-                # 总销售额已包含运费
-                c1.metric("💰 销售总额(含运费)", f"¥{df['total_amount'].sum():,.0f}")
-                c2.metric("📦 订单总量", len(df))
+                # 毛利计算
+                df['gross_profit'] = df['total_amount'] - df['construction_fee'] - df['material_fee'] - df['shipping_fee']
+                df['date'] = pd.to_datetime(df['date'], errors='coerce')
+                df['month_str'] = df['date'].dt.strftime('%Y-%m')
+
+                # --- 核心KPI ---
+                current_month = datetime.date.today().strftime('%Y-%m')
+                monthly_sales = df[df['month_str'] == current_month]['total_amount'].sum()
                 
-                closed_count = len(df[df['status']=='已完结/已收款'])
-                completion_rate = closed_count / len(df) * 100 if len(df) > 0 else 0
-                c3.metric("🔥 成交率", f"{completion_rate:.1f}%")
-                c4.metric("🛑 流失数", len(df[df['purchase_intent']=='流失']))
+                c1, c2, c3, c4, c5 = st.columns(5)
+                c1.metric("💰 总销售额", f"¥{df['total_amount'].sum():,.0f}")
+                c2.metric("📈 总体毛利", f"¥{df['gross_profit'].sum():,.0f}", help="销售额 - 施工 - 辅料 - 运费")
+                c3.metric("📏 总销售面积", f"{df['area'].sum():,.0f} ㎡") 
+                c4.metric("📅 本月业绩", f"¥{monthly_sales:,.0f}", delta=f"{monthly_sales - target_revenue:,.0f} (距目标)")
+                c5.metric("🛑 流失数", len(df[df['purchase_intent']=='流失']))
+
+                # --- 业绩达成进度条 ---
+                st.write(f"**本月目标达成率 ({current_month})**")
+                progress = min(monthly_sales / target_revenue, 1.0)
+                st.progress(progress)
+                st.caption(f"目标: ¥{target_revenue:,.0f} | 当前: ¥{monthly_sales:,.0f} ({progress*100:.1f}%)")
 
                 st.markdown("---")
                 
-                c_chart1, c_chart2 = st.columns(2)
-                with c_chart1:
-                    df['display_rep'] = df['sales_rep'].map(user_map).fillna(df['sales_rep'])
-                    rep_perf = df.groupby('display_rep')['total_amount'].sum().reset_index().sort_values('total_amount', ascending=False)
-                    fig = px.bar(rep_perf, x='display_rep', y='total_amount', text_auto=True, title="🏆 销售龙虎榜", color='display_rep')
-                    st.plotly_chart(fig, use_container_width=True)
+                # --- 新增模块：销售龙虎榜 (基于实际成交金额) ---
+                st.markdown("### 🏆 销售龙虎榜 (本月成交金额)")
                 
-                with c_chart2:
+                # 筛选出已成交/已收款的记录
+                df_achieved = df[df['status'] == '已完结/已收款'].copy()
+                df_achieved['achieved_month'] = df_achieved['date'].dt.strftime('%Y-%m')
+                
+                # 计算本月成交额
+                monthly_leaderboard = df_achieved[df_achieved['achieved_month'] == current_month]
+                
+                if not monthly_leaderboard.empty:
+                    leaderboard_data = monthly_leaderboard.groupby('sales_rep')['total_amount'].sum().reset_index()
+                    leaderboard_data = leaderboard_data.sort_values('total_amount', ascending=False)
+                    leaderboard_data['sales_rep'] = leaderboard_data['sales_rep'].map(user_map).fillna(leaderboard_data['sales_rep'])
+                    leaderboard_data.columns = ['👤 对接人', '💰 成交总额 (元)']
+
+                    st.dataframe(
+                        leaderboard_data.style.format({'💰 成交总额 (元)': '¥{:,.0f}'}),
+                        hide_index=True,
+                        use_container_width=True
+                    )
+                else:
+                    st.info("本月暂无已完结/已收款的成交记录。")
+                
+                st.markdown("---")
+
+
+                # --- 第一排：趋势与利润 ---
+                col_row1_1, col_row1_2 = st.columns(2)
+                
+                with col_row1_1:
+                    # 1. 销售额与毛利趋势
+                    monthly_trend = df.groupby('month_str')[['total_amount', 'gross_profit']].sum().reset_index()
+                    fig_trend = px.line(monthly_trend, x='month_str', y=['total_amount', 'gross_profit'], markers=True, 
+                                        title="📈 月度销售额与毛利趋势 (基于录入预估)", labels={'value':'金额', 'month_str':'月份', 'variable':'指标'})
+                    st.plotly_chart(fig_trend, use_container_width=True)
+                
+                with col_row1_2:
+                    # 2. 月度销售面积趋势图
+                    monthly_area = df.groupby('month_str')['area'].sum().reset_index()
+                    fig_area = px.bar(monthly_area, x='month_str', y='area', text_auto='.0f',
+                                      title="📐 月度销售面积趋势 (㎡)", labels={'area':'面积(㎡)', 'month_str':'月份'})
+                    st.plotly_chart(fig_area, use_container_width=True)
+
+                # --- 第二排：渠道与场地 ---
+                col_row2_1, col_row2_2 = st.columns(2)
+                
+                with col_row2_1:
+                    shop_perf = df.groupby('shop_name')['total_amount'].sum().reset_index().sort_values('total_amount', ascending=False)
+                    fig_shop = px.bar(shop_perf, x='shop_name', y='total_amount', text_auto='.2s', 
+                                      title="🏪 各店铺业绩对比 (金额)", color='shop_name')
+                    st.plotly_chart(fig_shop, use_container_width=True)
+
+                with col_row2_2:
+                    site_perf = df.groupby('site_type')['area'].sum().reset_index().sort_values('area', ascending=False).head(10)
+                    fig_site = px.bar(site_perf, y='site_type', x='area', orientation='h', text_auto='.2s',
+                                      title="🏟️ Top 10 销售场地类型 (面积)", color_discrete_sequence=px.colors.qualitative.Pastel)
+                    st.plotly_chart(fig_site, use_container_width=True)
+
+                # --- 第三排：漏斗与来源 ---
+                col_row3_1, col_row3_2 = st.columns(2)
+
+                with col_row3_1:
+                    status_counts = df['status'].value_counts().reset_index()
+                    status_counts.columns = ['status', 'count']
+                    sorter = STATUS_OPTIONS
+                    status_counts['status'] = pd.Categorical(status_counts['status'], categories=sorter, ordered=True)
+                    status_counts = status_counts.sort_values('status')
+                    fig_funnel = px.funnel(status_counts, x='count', y='status', title="⏳ 客户跟进漏斗")
+                    st.plotly_chart(fig_funnel, use_container_width=True)
+
+                with col_row3_2:
                     if 'source' in df.columns:
                         src_counts = df['source'].value_counts().reset_index()
                         src_counts.columns = ['source', 'count']
-                        fig2 = px.pie(src_counts, values='count', names='source', title="🌍 客户来源分布", hole=0.4)
-                        st.plotly_chart(fig2, use_container_width=True)
+                        fig_src = px.pie(src_counts, values='count', names='source', title="🌍 客户来源分布", hole=0.4)
+                        st.plotly_chart(fig_src, use_container_width=True)
 
-        # 4. 推广数据看板 (深度定制版)
+            else:
+                st.warning("暂无数据，请先录入销售信息。")
+
+        # 4. 推广数据看板
         elif choice == "🌐 推广数据看板":
             st.subheader("🌐 线上推广效果深度分析")
             
@@ -617,36 +693,30 @@ def main():
                 with st.form("promo_entry"):
                     col_p1, col_p2, col_p3 = st.columns(3)
                     with col_p1:
-                        # 字段：年月、店铺、推广类型
-                        p_month = st.text_input("推广年月 (如 2023-10)", value=datetime.date.today().strftime("%Y-%m"))
+                        d_val = st.date_input("推广月份 (选择该月任意一天即可)", value=datetime.date.today())
+                        p_month = d_val.strftime("%Y-%m") # 自动转换为 2023-10 格式
                         p_shop = st.selectbox("店铺", SHOP_OPTIONS)
                         p_type = st.selectbox("推广类型", PROMO_TYPE_OPTIONS)
                     
                     with col_p2:
-                        # 字段：总花费、成交花费、净成交额
                         p_total_spend = st.number_input("总花费 (元)", min_value=0.0, step=10.0)
                         p_trans_spend = st.number_input("成交花费 (元)", min_value=0.0, step=10.0)
                         p_net_gmv = st.number_input("净成交额 (元)", min_value=0.0, step=100.0)
-                        # 自动计算建议
                         if p_total_spend > 0:
                             calc_roi = p_net_gmv / p_total_spend
                             st.caption(f"💡 自动计算净投产比(ROI): {calc_roi:.2f}")
                     
                     with col_p3:
-                        # 字段：净投产比、每笔净成交花费
                         p_net_roi = st.number_input("净投产比 (ROI)", min_value=0.0, step=0.1)
                         p_cpa_net = st.number_input("每笔净成交花费 (元)", min_value=0.0, step=1.0)
                     
                     st.markdown("---")
                     col_p4, col_p5, col_p6 = st.columns(3)
                     with col_p4:
-                        # 字段：询单量
                         p_inquiry_count = st.number_input("询单量", min_value=0, step=1)
                     with col_p5:
-                         # 字段：询单花费
                         p_inquiry_spend = st.number_input("询单花费 (元)", min_value=0.0, step=10.0)
                     with col_p6:
-                         # 字段：询单成本
                         p_cpl = st.number_input("询单成本 (元/个)", min_value=0.0, step=1.0)
                         if p_inquiry_count > 0:
                              st.caption(f"💡 自动计算询单成本: {p_inquiry_spend/p_inquiry_count:.2f}")
@@ -656,56 +726,46 @@ def main():
                     if st.form_submit_button("✅ 提交数据"):
                         add_promo_data((p_month, p_shop, p_type, p_total_spend, p_trans_spend, p_net_gmv, 
                                         p_net_roi, p_cpa_net, p_inquiry_count, p_inquiry_spend, p_cpl, p_note))
-                        st.success("录入成功！")
+                        st.success(f"已录入 {p_month} 数据！")
                         st.rerun()
 
             st.markdown("---")
 
             if not df_promo.empty:
-                # 数据清洗
                 num_cols = ['total_spend', 'trans_spend', 'net_gmv', 'net_roi', 'cpa_net', 'inquiry_spend', 'cpl']
                 for c in num_cols: df_promo[c] = pd.to_numeric(df_promo[c], errors='coerce').fillna(0)
                 df_promo['inquiry_count'] = pd.to_numeric(df_promo['inquiry_count'], errors='coerce').fillna(0).astype(int)
 
-                # 1. 核心指标汇总 (按月)
                 st.markdown("### 1. 核心指标月度趋势")
-                
                 df_summary = df_promo.groupby('month').agg({
                     'total_spend': 'sum',
                     'net_gmv': 'sum',
                     'inquiry_count': 'sum'
                 }).reset_index().sort_values('month')
                 
-                # 计算整体ROI
                 df_summary['整体ROI'] = np.where(df_summary['total_spend']>0, df_summary['net_gmv']/df_summary['total_spend'], 0)
-                
                 st.dataframe(df_summary.style.format({'整体ROI': '{:.2f}', 'total_spend': '{:,.0f}', 'net_gmv': '{:,.0f}'}), hide_index=True)
 
                 col_c1, col_c2 = st.columns(2)
                 with col_c1:
-                    # 图表：净成交额 vs 总花费
                     fig1 = px.bar(df_summary, x='month', y=['net_gmv', 'total_spend'], barmode='group', 
                                   title='投入产出对比 (GMV vs Cost)', labels={'value':'金额','variable':'指标'})
                     st.plotly_chart(fig1, use_container_width=True)
                 
                 with col_c2:
-                    # 图表：ROI 趋势
                     fig2 = px.line(df_summary, x='month', y='整体ROI', title='整体净投产比 (ROI) 趋势', markers=True)
                     st.plotly_chart(fig2, use_container_width=True)
 
-                # 2. 深度分析：店铺 & 询单
                 st.markdown("### 2. 深度运营分析")
                 col_c3, col_c4 = st.columns(2)
                 
                 with col_c3:
-                    # 哪个店铺 ROI 最高？
                     df_shop = df_promo.groupby('shop').agg({'total_spend':'sum', 'net_gmv':'sum'}).reset_index()
                     df_shop['ROI'] = np.where(df_shop['total_spend']>0, df_shop['net_gmv']/df_shop['total_spend'], 0)
                     fig3 = px.bar(df_shop, x='shop', y='ROI', color='shop', title='各店铺投产比 (ROI) 对比', text_auto='.2f')
                     st.plotly_chart(fig3, use_container_width=True)
                 
                 with col_c4:
-                    # 询单成本分析
                     df_cpl = df_promo.groupby('month')['cpl'].mean().reset_index()
                     fig4 = px.line(df_cpl, x='month', y='cpl', title='平均询单成本 (CPL) 趋势', markers=True)
                     st.plotly_chart(fig4, use_container_width=True)
