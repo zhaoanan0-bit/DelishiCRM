@@ -165,7 +165,8 @@ def get_single_record(record_id):
 def admin_update_data(record_id, data):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    total_amount = (data['unit_price'] * data['area']) + data['construction_fee'] + data['material_fee'] + data['shipping_fee']
+    # 🚨 更改逻辑：总金额不再包含运费
+    total_amount = (data['unit_price'] * data['area']) + data['construction_fee'] + data['material_fee'] 
     
     c.execute('''UPDATE sales SET
         customer_name=?, phone=?, source=?, shop_name=?, unit_price=?, area=?, 
@@ -178,7 +179,7 @@ def admin_update_data(record_id, data):
     ))
     conn.commit()
     conn.close()
-    update_follow_up(record_id, "[管理员修改]: 基本信息(含运费)已更新，金额已重算。", 
+    update_follow_up(record_id, "[管理员修改]: 基本信息(不含运费)已更新，金额已重算。", 
                      datetime.date.today().isoformat(), data['status'], data['purchase_intent'])
 
 def delete_data(record_id):
@@ -230,14 +231,14 @@ def admin_fix_area_price_swap():
     # 1. 临时交换 unit_price 和 area
     c.execute("UPDATE sales SET unit_price = area, area = unit_price")
     
-    # 2. 重新计算 total_amount
+    # 2. 重新计算 total_amount (🚨 更改逻辑：不包含运费)
     c.execute("""
         UPDATE sales 
-        SET total_amount = (unit_price * area) + construction_fee + material_fee + shipping_fee
+        SET total_amount = (unit_price * area) + construction_fee + material_fee
     """)
     
     # 3. 记录操作
-    log_message = f"\n[{datetime.date.today()}] [系统管理员操作]: 批量修复单价和面积数据互换，并重新计算了总金额。"
+    log_message = f"\n[{datetime.date.today()}] [系统管理员操作]: 批量修复单价和面积数据互换，并重新计算了**不含运费**的总金额。"
     c.execute("UPDATE sales SET follow_up_history = follow_up_history || ?", (log_message,))
     
     conn.commit()
@@ -340,8 +341,8 @@ def main():
                 df_export['对接人'] = df_export['对接人'].map(user_map).fillna(df_export['对接人'])
                 
                 output = io.BytesIO()
-                # 注意：在 get_data() 已经重命名，这里不能再用英文列名计算了
-                df_export['预估总金额(元)'] = (df_export['单价(元/㎡)'] * df_export['平方数(㎡)']) + df_export['施工费(元)'] + df_export['辅料费(元)'] + df_export['运费(元)']
+                # 🚨 更改逻辑：在导出时计算一个"实际含运费总额"字段供参考
+                df_export['实际含运费总额(元)'] = df_export['预估总金额(元)'] + df_export['运费(元)']
                 
                 # 重新映射日期列名以匹配 get_data() 的输出
                 df_export.rename(columns={
@@ -404,8 +405,11 @@ def main():
                      next_fup = st.date_input("🚨 计划下次跟进", datetime.date.today() + datetime.timedelta(days=3))
                      first_remark = st.text_area("首次沟通记录")
                  
-                 preview_total = (unit_price * area) + const_fee + mat_fee + shipping_fee
-                 st.caption(f"💰 预估总金额（含运费）：{preview_total:,.2f} 元")
+                 # 🚨 更改逻辑：预估总金额不含运费
+                 preview_total = (unit_price * area) + const_fee + mat_fee
+                 st.caption(f"💰 **预估总金额** (不含运费): **{preview_total:,.2f}** 元")
+                 st.caption(f"🚚 运费: {shipping_fee:,.2f} 元 | 实际总价(含运): **{(preview_total + shipping_fee):,.2f}** 元")
+
 
                  submitted = st.form_submit_button("✅ 提交录入")
 
@@ -418,7 +422,8 @@ def main():
                              rep_display_name = user_map.get(existing_rep, existing_rep)
                              st.error(f"❌ 录入失败！该客户已存在，目前由 **{rep_display_name}** 负责。")
                          else:
-                             calc_total = (unit_price * area) + const_fee + mat_fee + shipping_fee
+                             # 🚨 更改逻辑：calc_total 不含运费
+                             calc_total = (unit_price * area) + const_fee + mat_fee
                              log_entry = f"[{datetime.date.today()} {current_display_name}]: 首次录入。{first_remark}"
                              
                              data_tuple = (
@@ -431,7 +436,7 @@ def main():
                              st.success(f"🎉 客户 {customer_name} 录入成功！")
 
 
-        # 2. 数据查看页面
+        # 2. 数据查看页面 (无需大的修改，因为 get_data() 已处理汉化)
         elif choice == "📊 数据追踪与查看":
              st.subheader("📋 客户追踪列表")
              df = get_data()
@@ -559,9 +564,9 @@ def main():
                     "是否施工": st.column_config.TextColumn("是否施工"),
                     "施工费(元)": st.column_config.NumberColumn("施工费(元)", format="%.2f"),
                     "辅料费(元)": st.column_config.NumberColumn("辅料费(元)", format="%.2f"),
-                    "运费(元)": st.column_config.NumberColumn("运费(元)", format="%.2f"),
+                    "运费(元)": st.column_config.NumberColumn("运费(元)", format="%.2f"), # 运费单独列
                     "购买意向": st.column_config.TextColumn("购买意向"),
-                    "预估总金额(元)": st.column_config.NumberColumn("预估总金额(元)", format="¥%.2f"),
+                    "预估总金额(元)": st.column_config.NumberColumn("预估总金额(元)", format="¥%.2f", help="不含运费的总金额"), 
                     "寄样单号": st.column_config.TextColumn("寄样单号"),
                     "订单号": st.column_config.TextColumn("订单号"),
                     "跟进历史": st.column_config.TextColumn("📜 跟进历史", width="large"),
@@ -606,7 +611,7 @@ def main():
                                  st.rerun()
 
                      with col_edit:
-                         with st.expander("📝 修改基本信息(含运费)"):
+                         with st.expander("📝 修改基本信息(不含运费)"):
                              u_id = st.number_input("ID", min_value=1, key="edit_id")
                              if st.button("加载"):
                                  record = get_single_record(u_id)
@@ -646,10 +651,10 @@ def main():
                      st.markdown("---")
                      with st.expander("🚨 数据库维护工具"):
                          if st.button("🔄 修复单价/面积数据互换 (所有记录)"):
-                             st.warning("⚠️ 警告：此操作将批量交换所有记录的单价和面积，并重算总金额。请确认执行！")
+                             st.warning("⚠️ 警告：此操作将批量交换所有记录的单价和面积，并重算总金额（不含运费）。请确认执行！")
                              if st.button("🔥 确认执行修复操作"):
                                  rows = admin_fix_area_price_swap()
-                                 st.success(f"🎉 修复完成！共影响 {rows} 条记录的单价、面积和总金额。")
+                                 st.success(f"🎉 修复完成！共影响 {rows} 条记录的单价、面积和总金额（不含运费）。")
                                  st.rerun()
 
         # 3. 销售分析页面 
@@ -658,9 +663,10 @@ def main():
             
             # 侧边栏：目标设定
             st.sidebar.markdown("---")
-            target_revenue = st.sidebar.number_input("🎯 本月业绩目标 (元)", min_value=10000, value=100000, step=5000)
+            target_revenue = st.sidebar.number_input("🎯 本月业绩目标 (元)", min_value=10000, value=100000, step=5000, key="target_rev")
+            # 🚨 新增面积目标
+            target_area = st.sidebar.number_input("📐 本月面积目标 (㎡)", min_value=100.0, value=500.0, step=10.0, key="target_area")
             
-            # 使用 get_data() 获取已汉化的列名
             df = get_data()
             if not df.empty:
                 # 使用中文列名进行数值和日期处理
@@ -670,32 +676,47 @@ def main():
                 df['辅料费(元)'] = pd.to_numeric(df['辅料费(元)'], errors='coerce').fillna(0)
                 df['平方数(㎡)'] = pd.to_numeric(df['平方数(㎡)'], errors='coerce').fillna(0)
                 
-                # 毛利计算
-                df['毛利'] = df['预估总金额(元)'] - df['施工费(元)'] - df['辅料费(元)'] - df['运费(元)']
+                # 毛利计算 (🚨 总金额不含运费，所以毛利 = 总金额 - 施工费 - 辅料费)
+                df['毛利'] = df['预估总金额(元)'] - df['施工费(元)'] - df['辅料费(元)'] 
                 df['录入日期'] = pd.to_datetime(df['录入日期'], errors='coerce')
                 df['月度'] = df['录入日期'].dt.strftime('%Y-%m')
 
                 # --- 核心KPI ---
                 current_month = datetime.date.today().strftime('%Y-%m')
                 monthly_sales = df[df['月度'] == current_month]['预估总金额(元)'].sum()
+                monthly_area = df[df['月度'] == current_month]['平方数(㎡)'].sum() # 🚨 新增本月面积
+
                 
-                c1, c2, c3, c4, c5 = st.columns(5)
-                c1.metric("💰 总销售额", f"¥{df['预估总金额(元)'].sum():,.0f}")
-                c2.metric("📈 总体毛利", f"¥{df['毛利'].sum():,.0f}", help="销售额 - 施工 - 辅料 - 运费")
+                c1, c2, c3, c4, c5, c6 = st.columns(6) # 🚨 增加一列显示面积KPI
+                c1.metric("💰 总销售额(不含运)", f"¥{df['预估总金额(元)'].sum():,.0f}")
+                c2.metric("📈 总体毛利", f"¥{df['毛利'].sum():,.0f}", help="销售额(不含运费) - 施工费 - 辅料费")
                 c3.metric("📏 总销售面积", f"{df['平方数(㎡)'].sum():,.0f} ㎡") 
-                c4.metric("📅 本月业绩", f"¥{monthly_sales:,.0f}", delta=f"{monthly_sales - target_revenue:,.0f} (距目标)")
-                c5.metric("🛑 流失数", len(df[df['购买意向']=='流失']))
+                c4.metric("🚚 总运费", f"¥{df['运费(元)'].sum():,.0f}") # 🚨 单独展示总运费
+                c5.metric("📅 本月销售额", f"¥{monthly_sales:,.0f}", delta=f"{monthly_sales - target_revenue:,.0f} (距目标)")
+                c6.metric("📐 本月销售面积", f"{monthly_area:,.0f} ㎡", delta=f"{monthly_area - target_area:,.0f} (距目标)") # 🚨 新增面积KPI
 
                 # --- 业绩达成进度条 ---
                 st.write(f"**本月目标达成率 ({current_month})**")
-                progress = min(monthly_sales / target_revenue, 1.0)
-                st.progress(progress)
-                st.caption(f"目标: ¥{target_revenue:,.0f} | 当前: ¥{monthly_sales:,.0f} ({progress*100:.1f}%)")
+                
+                col_prog1, col_prog2 = st.columns(2)
+                
+                with col_prog1:
+                    st.caption("金额目标达成率:")
+                    progress_rev = min(monthly_sales / target_revenue, 1.0)
+                    st.progress(progress_rev)
+                    st.caption(f"目标: ¥{target_revenue:,.0f} | 当前: ¥{monthly_sales:,.0f} ({progress_rev*100:.1f}%)")
+                
+                with col_prog2:
+                    st.caption("面积目标达成率:")
+                    progress_area = min(monthly_area / target_area, 1.0)
+                    st.progress(progress_area)
+                    st.caption(f"目标: {target_area:,.0f} ㎡ | 当前: {monthly_area:,.0f} ㎡ ({progress_area*100:.1f}%)")
+
 
                 st.markdown("---")
                 
                 # --- 销售龙虎榜 (基于实际成交金额) ---
-                st.markdown("### 🏆 销售龙虎榜 (本月成交金额)")
+                st.markdown("### 🏆 销售龙虎榜 (本月成交金额 - 不含运费)") # 🚨 标题修改
                 
                 df_achieved = df[df['跟踪进度'] == '已完结/已收款'].copy()
                 df_achieved['成交月'] = df_achieved['录入日期'].dt.strftime('%Y-%m')
@@ -724,16 +745,16 @@ def main():
                 col_row1_1, col_row1_2 = st.columns(2)
                 
                 with col_row1_1:
-                    # 1. 销售额与毛利趋势
+                    # 1. 销售额(不含运)与毛利趋势
                     monthly_trend = df.groupby('月度')[['预估总金额(元)', '毛利']].sum().reset_index()
                     fig_trend = px.line(monthly_trend, x='月度', y=['预估总金额(元)', '毛利'], markers=True, 
-                                        title="📈 月度销售额与毛利趋势 (基于录入预估)", labels={'value':'金额', '月度':'月份', 'variable':'指标'})
+                                        title="📈 月度销售额(不含运费)与毛利趋势", labels={'value':'金额', '月度':'月份', 'variable':'指标'})
                     st.plotly_chart(fig_trend, use_container_width=True)
                 
                 with col_row1_2:
                     # 2. 月度销售面积趋势图
-                    monthly_area = df.groupby('月度')['平方数(㎡)'].sum().reset_index()
-                    fig_area = px.bar(monthly_area, x='月度', y='平方数(㎡)', text_auto='.0f',
+                    monthly_area_trend = df.groupby('月度')['平方数(㎡)'].sum().reset_index()
+                    fig_area = px.bar(monthly_area_trend, x='月度', y='平方数(㎡)', text_auto='.0f',
                                       title="📐 月度销售面积趋势 (㎡)", labels={'平方数(㎡)':'面积(㎡)', '月度':'月份'})
                     st.plotly_chart(fig_area, use_container_width=True)
 
@@ -741,10 +762,10 @@ def main():
                 col_row2_1, col_row2_2 = st.columns(2)
                 
                 with col_row2_1:
-                    # 使用中文列名
+                    # 使用中文列名 (预估总金额不含运费)
                     shop_perf = df.groupby('店铺名称')['预估总金额(元)'].sum().reset_index().sort_values('预估总金额(元)', ascending=False)
                     fig_shop = px.bar(shop_perf, x='店铺名称', y='预估总金额(元)', text_auto='.2s', 
-                                      title="🏪 各店铺业绩对比 (金额)", color='店铺名称')
+                                      title="🏪 各店铺业绩对比 (金额 - 不含运)", color='店铺名称')
                     st.plotly_chart(fig_shop, use_container_width=True)
 
                 with col_row2_2:
@@ -778,7 +799,7 @@ def main():
             else:
                 st.warning("暂无数据，请先录入销售信息。")
 
-        # 4. 推广数据看板 (推广数据本身是英文变量名，保持不变)
+        # 4. 推广数据看板 
         elif choice == "🌐 推广数据看板":
             st.subheader("🌐 线上推广效果深度分析")
             
