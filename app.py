@@ -69,7 +69,26 @@ REQUIRED_IMPORT_COLUMNS = [
 
 # --- 数据库连接函数（全部使用内存模式）---
 def get_user_conn():
-    return sqlite3.connect(USER_DB_FILE)
+    # 🚨 关键修复：每次连接都确保表结构和初始数据存在
+    conn = sqlite3.connect(USER_DB_FILE)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS users (
+        username TEXT PRIMARY KEY,
+        password TEXT,
+        role TEXT,
+        display_name TEXT
+    )''')
+    
+    # 只有当用户表为空时，才插入初始用户
+    c.execute("SELECT COUNT(*) FROM users")
+    if c.fetchone()[0] == 0:
+        for username, data in INITIAL_USERS.items():
+            # 使用 OR IGNORE 确保多次调用不会重复插入
+            c.execute("INSERT OR IGNORE INTO users VALUES (?, ?, ?, ?)", 
+                      (username, data['password'], data['role'], data['display_name']))
+    conn.commit()
+    return conn # 返回连接对象
+
 
 def get_crm_conn():
     return sqlite3.connect(DB_FILE)
@@ -79,23 +98,7 @@ def get_promo_conn():
 
 
 # --- 数据库函数 (用户管理) ---
-def init_user_db():
-    conn = get_user_conn()
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users (
-        username TEXT PRIMARY KEY,
-        password TEXT,
-        role TEXT,
-        display_name TEXT
-    )''')
-    conn.commit()
-    c.execute("SELECT COUNT(*) FROM users")
-    if c.fetchone()[0] == 0:
-        for username, data in INITIAL_USERS.items():
-            c.execute("INSERT INTO users VALUES (?, ?, ?, ?)", 
-                      (username, data['password'], data['role'], data['display_name']))
-        conn.commit()
-    conn.close()
+# 🚨 移除了 init_user_db()，其功能已被 get_user_conn() 吸收。
 
 def get_all_users():
     conn = get_user_conn()
@@ -421,7 +424,7 @@ def check_password():
 # --- 主程序 ---
 def main():
     st.set_page_config(page_title="CRM运营全能版", layout="wide")
-    init_user_db()
+    # 🚨 关键修复：移除了 init_user_db() 的调用。
     init_db()
     init_promo_db()
 
