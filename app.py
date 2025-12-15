@@ -208,8 +208,6 @@ def import_data_from_excel(df_imported):
     df_to_save['sales_rep'] = df_to_save['sales_rep'].apply(lambda x: display_to_user_map.get(x, 'admin'))
 
     # 4. 插入数据库
-    columns = list(df_to_save.columns) + ['total_amount'] # 加上计算的 total_amount
-    columns.remove('total_amount') # 在前面计算了，现在要按照数据库列顺序
     columns = [
         'date', 'sales_rep', 'customer_name', 'phone', 'source', 'shop_name', 'unit_price', 'area', 
         'site_type', 'status', 'is_construction', 'construction_fee', 'material_fee', 'shipping_fee',
@@ -374,7 +372,9 @@ def get_promo_data(rename_cols=False):
     conn.close()
         
     if rename_cols:
-        df.rename(columns=PROMO_COL_MAP, inplace=True)
+        # 🚨 确保只重命名存在的列
+        valid_rename_map = {k: v for k, v in PROMO_COL_MAP.items() if k in df.columns}
+        df.rename(columns=valid_rename_map, inplace=True)
     return df
 
 # --- 登录逻辑 ---
@@ -703,9 +703,16 @@ def main():
                          
                          if uploaded_file is not None:
                              try:
-                                 if uploaded_file.name.endswith('.csv'):
-                                     df_import = pd.read_csv(uploaded_file)
-                                 else:
+                                 # 自动识别文件类型
+                                 if uploaded_file.name.endswith(('.csv', '.txt')):
+                                     # 尝试使用GBK/utf-8解码，增强兼容性
+                                     try:
+                                         df_import = pd.read_csv(uploaded_file, encoding='utf-8')
+                                     except UnicodeDecodeError:
+                                         uploaded_file.seek(0) # 重置文件指针
+                                         df_import = pd.read_csv(uploaded_file, encoding='gbk')
+
+                                 else: # 默认为 Excel
                                      df_import = pd.read_excel(uploaded_file)
                                  
                                  st.success("文件读取成功！请预览数据并确认导入。")
