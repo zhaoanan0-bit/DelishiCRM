@@ -12,7 +12,7 @@ import os
 # 🚨 保持不变：使用内存数据库，确保在 Streamlit Cloud 上稳定运行
 DB_FILE = ':memory:' 
 PROMO_DB_FILE = ':memory:'
-USER_DB_FILE = ':memory:'
+USER_DB_FILE = ':memory:' # 用户数据库文件
 
 DAYS_FOR_TRANSFER = 20 
 
@@ -70,7 +70,7 @@ REQUIRED_IMPORT_COLUMNS = [
 # --- 数据库连接函数（全部使用内存模式）---
 
 def get_user_conn():
-    # 🚨 保持不变：用户数据库初始化逻辑已整合到连接函数中
+    # 🚨 关键修复：确保在任何时候都创建表和插入初始用户
     conn = sqlite3.connect(USER_DB_FILE)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS users (
@@ -80,19 +80,17 @@ def get_user_conn():
         display_name TEXT
     )''')
     
-    # 只有当用户表为空时，才插入初始用户
-    c.execute("SELECT COUNT(*) FROM users")
-    if c.fetchone()[0] == 0:
-        for username, data in INITIAL_USERS.items():
-            # 使用 OR IGNORE 确保多次调用不会重复插入
-            c.execute("INSERT OR IGNORE INTO users VALUES (?, ?, ?, ?)", 
-                      (username, data['password'], data['role'], data['display_name']))
+    # 始终尝试插入初始用户，使用 OR IGNORE 确保不会因为重复键而报错
+    for username, data in INITIAL_USERS.items():
+        c.execute("INSERT OR IGNORE INTO users VALUES (?, ?, ?, ?)", 
+                  (username, data['password'], data['role'], data['display_name']))
+    
     conn.commit()
     return conn # 返回连接对象
 
 
 def get_crm_conn():
-    # 🚨 关键修复：将 CRM 客户表创建逻辑移入连接函数中
+    # 🚨 保持不变：确保 CRM 客户表创建
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS sales (
@@ -123,7 +121,7 @@ def get_crm_conn():
     return conn
 
 def get_promo_conn():
-    # 🚨 关键修复：将推广数据表创建逻辑移入连接函数中
+    # 🚨 保持不变：确保推广数据表创建
     conn = sqlite3.connect(PROMO_DB_FILE)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS promotions (
@@ -146,7 +144,7 @@ def get_promo_conn():
 
 
 # --- 数据库函数 (初始化，现为空) ---
-# 🚨 保持不变：这些函数现在只是为了兼容 main() 中的调用而保留，实际初始化逻辑已转移。
+# 🚨 保持不变：这些函数现在只是为了兼容 main() 中的调用而保留
 def init_db():
     pass
 
@@ -163,6 +161,7 @@ def get_all_users():
     return df
 
 def get_user_info(username):
+    # 🚨 此函数依赖于 get_user_conn() 成功创建 users 表
     conn = get_user_conn()
     c = conn.cursor()
     c.execute("SELECT password, role, display_name FROM users WHERE username=?", (username,))
@@ -403,7 +402,8 @@ def get_promo_data(rename_cols=False):
 # --- 登录逻辑 ---
 def check_password():
     def password_entered():
-        user_info = get_user_info(st.session_state["username"])
+        # 🚨 这里的 get_user_info() 会调用 get_user_conn() 确保表存在
+        user_info = get_user_info(st.session_state["username"]) 
         if user_info and st.session_state["password"] == user_info['password']:
             st.session_state["password_correct"] = True
             st.session_state["role"] = user_info['role']
