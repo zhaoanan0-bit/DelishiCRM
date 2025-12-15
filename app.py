@@ -47,6 +47,23 @@ CRM_COL_MAP = {
     'next_follow_up_date': '计划下次跟进'
 }
 
+# 推广数据列名映射
+PROMO_COL_MAP = {
+    'id': 'ID', 'month': '月份', 'shop': '店铺', 'promo_type': '推广类型',
+    'total_spend': '总花费(元)', 'trans_spend': '成交花费(元)', 'net_gmv': '净成交额(元)',
+    'net_roi': '净投产比(ROI)', 'cpa_net': '每笔净成交花费(元)', 'inquiry_count': '询单量',
+    'inquiry_spend': '询单花费(元)', 'cpl': '询单成本(元/个)', 'note': '备注'
+}
+
+# 中文到英文列名映射（用于导入时转换）
+CN_TO_EN_MAP = {v: k for k, v in CRM_COL_MAP.items()}
+# 导入时必须包含的列（不含 ID，不含自动计算项）
+REQUIRED_IMPORT_COLUMNS = [
+    '录入日期', '对接人', '客户名称', '联系电话', '客户来源', '店铺名称', '单价(元/㎡)', '平方数(㎡)', 
+    '应用场地', '跟踪进度', '是否施工', '施工费(元)', '辅料费(元)', '运费(元)', '购买意向', 
+    '跟进历史', '寄样单号', '订单号', '上次跟进日期', '计划下次跟进'
+]
+
 # --- 数据库函数 (用户管理) ---
 def init_user_db():
     conn = sqlite3.connect(USER_DB_FILE)
@@ -97,6 +114,10 @@ def add_new_user(username, password, role, display_name):
 def get_user_map():
     df = get_all_users()
     return df.set_index('username')['display_name'].to_dict()
+
+def get_display_name_to_username_map():
+    df = get_all_users()
+    return df.set_index('display_name')['username'].to_dict()
 
 # --- 数据库函数 (CRM 客户数据) ---
 def init_db():
@@ -153,6 +174,72 @@ def add_data(data):
     conn.commit()
     conn.close()
 
+# 🚨 新增：批量导入功能
+def import_data_from_excel(df_imported):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    display_to_user_map = get_display_name_to_username_map()
+    
+    # 1. 检查并重命名列
+    df_imported.columns = [col.strip() for col in df_imported.columns] # 去除空格
+    
+    missing_cols = [col for col in REQUIRED_IMPORT_COLUMNS if col not in df_imported.columns]
+    if missing_cols:
+        return False, f"缺少以下必填列，请检查表格抬头：{', '.join(missing_cols)}"
+
+    # 仅选择需要导入的列，并将其转换为数据库的英文列名
+    df_to_save = df_imported[REQUIRED_IMPORT_COLUMNS].copy()
+    df_to_save.rename(columns=CN_TO_EN_MAP, inplace=True)
+    
+    # 2. 数据清洗和计算
+    df_to_save['date'] = pd.to_datetime(df_to_save['date'], errors='coerce').dt.strftime('%Y-%m-%d')
+    df_to_save['last_follow_up_date'] = pd.to_datetime(df_to_save['last_follow_up_date'], errors='coerce').dt.strftime('%Y-%m-%d')
+    df_to_save['next_follow_up_date'] = pd.to_datetime(df_to_save['next_follow_up_date'], errors='coerce').dt.strftime('%Y-%m-%d')
+
+    # 确保数值列是数字，空值填 0
+    num_cols = ['unit_price', 'area', 'construction_fee', 'material_fee', 'shipping_fee']
+    for col in num_cols:
+        df_to_save[col] = pd.to_numeric(df_to_save[col], errors='coerce').fillna(0.0)
+
+    # 计算 total_amount (预估总金额，不含运费)
+    df_to_save['total_amount'] = (df_to_save['unit_price'] * df_to_save['area']) + df_to_save['construction_fee'] + df_to_save['material_fee']
+    
+    # 3. 对接人映射：将中文名转换为 username
+    df_to_save['sales_rep'] = df_to_save['sales_rep'].apply(lambda x: display_to_user_map.get(x, 'admin'))
+
+    # 4. 插入数据库
+    columns = list(df_to_save.columns) + ['total_amount'] # 加上计算的 total_amount
+    columns.remove('total_amount') # 在前面计算了，现在要按照数据库列顺序
+    columns = [
+        'date', 'sales_rep', 'customer_name', 'phone', 'source', 'shop_name', 'unit_price', 'area', 
+        'site_type', 'status', 'is_construction', 'construction_fee', 'material_fee', 'shipping_fee',
+        'purchase_intent', 'total_amount', 'follow_up_history', 'sample_no', 'order_no',
+        'last_follow_up_date', 'next_follow_up_date' 
+    ]
+    
+    data_tuples = []
+    for index, row in df_to_save.iterrows():
+        # 严格按照数据库列顺序构建元组
+        data_tuples.append((
+            row['date'], row['sales_rep'], row['customer_name'], row['phone'], row['source'], row['shop_name'],
+            row['unit_price'], row['area'], row['site_type'], row['status'], row['is_construction'],
+            row['construction_fee'], row['material_fee'], row['shipping_fee'], row['purchase_intent'],
+            row['total_amount'], row['follow_up_history'], row['sample_no'], row['order_no'],
+            row['last_follow_up_date'], row['next_follow_up_date']
+        ))
+
+    try:
+        c.executemany(f'''INSERT INTO sales ({', '.join(columns)}) 
+                          VALUES ({', '.join(['?']*len(columns))})''', data_tuples)
+        conn.commit()
+        conn.close()
+        return True, len(df_imported)
+    except Exception as e:
+        conn.close()
+        return False, f"数据库写入失败：{e}"
+
+
+# ... (其他 CRUD 函数保持不变) ...
 def get_single_record(record_id):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -221,7 +308,6 @@ def check_customer_exist(name, phone):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     # 增加对 phone 字段非空判断，避免空电话号码导致误判
-    # 修复了在 8c9a0402d646a00b1b7df684f50c0e75.png 中出现的 SQLite operational error
     c.execute("SELECT sales_rep FROM sales WHERE customer_name=? OR (phone IS NOT NULL AND phone != '' AND phone=?)", (name, phone))
     result = c.fetchone()
     conn.close()
@@ -286,15 +372,7 @@ def get_promo_data(rename_cols=False):
     conn = sqlite3.connect(PROMO_DB_FILE)
     df = pd.read_sql_query("SELECT * FROM promotions", conn)
     conn.close()
-    
-    # 推广数据列名映射
-    PROMO_COL_MAP = {
-        'id': 'ID', 'month': '月份', 'shop': '店铺', 'promo_type': '推广类型',
-        'total_spend': '总花费(元)', 'trans_spend': '成交花费(元)', 'net_gmv': '净成交额(元)',
-        'net_roi': '净投产比(ROI)', 'cpa_net': '每笔净成交花费(元)', 'inquiry_count': '询单量',
-        'inquiry_spend': '询单花费(元)', 'cpl': '询单成本(元/个)', 'note': '备注'
-    }
-    
+        
     if rename_cols:
         df.rename(columns=PROMO_COL_MAP, inplace=True)
     return df
@@ -364,7 +442,10 @@ def main():
                 df_export_cn['实际含运费总额(元)'] = df_export_cn['预估总金额(元)'] + df_export_cn['运费(元)']
                 
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                    df_export_cn.to_excel(writer, index=False, sheet_name='Sheet1')
+                    # 仅导出中文列名的子集，避免导出 days_since_fup 等临时列
+                    cols_to_export = list(CRM_COL_MAP.values()) + ['实际含运费总额(元)']
+                    df_export_cn[[c for c in cols_to_export if c in df_export_cn.columns]].to_excel(writer, index=False, sheet_name='Sheet1')
+                    
                 excel_data = output.getvalue()
                 st.sidebar.download_button(label="📥 客户数据备份", data=excel_data, file_name=f'CRM_Customer_Backup_{datetime.date.today()}.xlsx', mime='application/vnd.ms-excel')
             else:
@@ -449,7 +530,7 @@ def main():
                              st.success(f"🎉 客户 {customer_name} 录入成功！")
 
 
-        # 2. 数据查看页面 (重点修复区域)
+        # 2. 数据查看页面 
         elif choice == "📊 数据追踪与查看":
              st.subheader("📋 客户追踪列表")
              
@@ -596,7 +677,7 @@ def main():
                     "中文对接人": None # 隐藏计算列
                  }
                  
-                 # 确保只选择 CRM_COL_MAP 中定义的中文列名 (以及可能新增的中文对接人，但这里将其隐藏了)
+                 # 确保只选择 CRM_COL_MAP 中定义的中文列名 
                  display_cols = list(CRM_COL_MAP.values()) 
                  df_display = df_final[[c for c in display_cols if c in df_final.columns]].copy()
 
@@ -613,6 +694,36 @@ def main():
                      st.markdown("---")
                      st.subheader("🛠️ 管理员操作区")
                      
+                     # 导入功能集成在这里
+                     with st.expander("📥 批量导入客户数据 (Excel/CSV)"):
+                         st.warning("导入前请注意：导入文件需**完全匹配**以下所有列名，否则导入会失败！")
+                         st.markdown(f"**必填列名:** `{', '.join(REQUIRED_IMPORT_COLUMNS)}`")
+                         
+                         uploaded_file = st.file_uploader("选择您的 Excel/CSV 文件", type=['xlsx', 'csv'])
+                         
+                         if uploaded_file is not None:
+                             try:
+                                 if uploaded_file.name.endswith('.csv'):
+                                     df_import = pd.read_csv(uploaded_file)
+                                 else:
+                                     df_import = pd.read_excel(uploaded_file)
+                                 
+                                 st.success("文件读取成功！请预览数据并确认导入。")
+                                 st.dataframe(df_import.head())
+                                 
+                                 if st.button("🚀 确认导入并写入数据库"):
+                                     success, result = import_data_from_excel(df_import)
+                                     if success:
+                                         st.success(f"🎉 导入成功！共导入 {result} 条记录。")
+                                         st.balloons()
+                                         st.rerun()
+                                     else:
+                                         st.error(f"导入失败！请检查文件格式和列名。错误信息: {result}")
+                                         
+                             except Exception as e:
+                                 st.error(f"读取文件失败，请确保格式正确且编码为 UTF-8 (如果是 CSV)。错误: {e}")
+
+
                      col_user, col_del, col_edit = st.columns(3)
                      
                      with col_user:
@@ -857,7 +968,7 @@ def main():
                             st.caption(f"💡 自动计算净投产比(ROI): {calc_roi:.2f}")
                     
                     with col_p3:
-                        p_net_roi = st.number_input("净投产比 (ROI)", min_value=0.0, step=0.1)
+                        p_net_roi = st.number_input("净投产比 (ROI)", min_value=0.0, step=0.1, value=(calc_roi if 'calc_roi' in locals() else 0.0))
                         p_cpa_net = st.number_input("每笔净成交花费 (元)", min_value=0.0, step=1.0)
                     
                     st.markdown("---")
@@ -867,9 +978,10 @@ def main():
                     with col_p5:
                         p_inquiry_spend = st.number_input("询单花费 (元)", min_value=0.0, step=10.0)
                     with col_p6:
-                        p_cpl = st.number_input("询单成本 (元/个)", min_value=0.0, step=1.0)
+                        p_cpl_calc = p_inquiry_spend/p_inquiry_count if p_inquiry_count > 0 else 0.0
+                        p_cpl = st.number_input("询单成本 (元/个)", min_value=0.0, step=1.0, value=p_cpl_calc)
                         if p_inquiry_count > 0:
-                             st.caption(f"💡 自动计算询单成本: {p_inquiry_spend/p_inquiry_count:.2f}")
+                             st.caption(f"💡 自动计算询单成本: {p_cpl_calc:.2f}")
                     
                     p_note = st.text_area("备注及优化建议")
                     
@@ -884,45 +996,61 @@ def main():
             if not df_promo.empty:
                 # df_promo 此时已经是中文列名
                 num_cols = ['总花费(元)', '成交花费(元)', '净成交额(元)', '净投产比(ROI)', '每笔净成交花费(元)', '询单花费(元)', '询单成本(元/个)']
-                for c in num_cols: df_promo[c] = pd.to_numeric(df_promo[c], errors='coerce').fillna(0)
-                df_promo['询单量'] = pd.to_numeric(df_promo['询单量'], errors='coerce').fillna(0).astype(int)
+                for c in num_cols: 
+                     # 🚨 修复 Key Error: 检查列是否存在
+                     if c in df_promo.columns:
+                         df_promo[c] = pd.to_numeric(df_promo[c], errors='coerce').fillna(0)
+                if '询单量' in df_promo.columns:
+                    df_promo['询单量'] = pd.to_numeric(df_promo['询单量'], errors='coerce').fillna(0).astype(int)
 
                 st.markdown("### 1. 核心指标月度趋势")
-                df_summary = df_promo.groupby('月份').agg({
-                    '总花费(元)': 'sum',
-                    '净成交额(元)': 'sum',
-                    '询单量': 'sum'
-                }).reset_index().sort_values('月份')
                 
-                df_summary['整体ROI'] = np.where(df_summary['总花费(元)']>0, df_summary['净成交额(元)']/df_summary['总花费(元)'], 0)
-                st.dataframe(df_summary.style.format({'整体ROI': '{:.2f}', '总花费(元)': '{:,.0f}', '净成交额(元)': '{:,.0f}'}), hide_index=True)
+                # 🚨 修复 Key Error: 聚合前检查列是否存在
+                agg_cols = [c for c in ['总花费(元)', '净成交额(元)', '询单量'] if c in df_promo.columns]
+                
+                if '月份' in df_promo.columns and agg_cols:
+                    df_summary = df_promo.groupby('月份')[agg_cols].sum().reset_index().sort_values('月份')
+                else:
+                    # 如果缺少关键列，则无法计算趋势
+                    st.info("推广数据表缺少关键列，无法生成图表。请检查录入的数据。")
+                    df_summary = pd.DataFrame(columns=['月份', '总花费(元)', '净成交额(元)', '询单量'])
 
-                col_c1, col_c2 = st.columns(2)
-                with col_c1:
-                    fig1 = px.bar(df_summary, x='月份', y=['净成交额(元)', '总花费(元)'], barmode='group', 
-                                  title='投入产出对比 (GMV vs Cost)', labels={'value':'金额','variable':'指标'})
-                    st.plotly_chart(fig1, use_container_width=True)
-                
-                with col_c2:
-                    fig2 = px.line(df_summary, x='月份', y='整体ROI', title='整体净投产比 (ROI) 趋势', markers=True)
-                    st.plotly_chart(fig2, use_container_width=True)
+                if '总花费(元)' in df_summary.columns:
+                    df_summary['整体ROI'] = np.where(df_summary['总花费(元)']>0, df_summary['净成交额(元)']/df_summary['总花费(元)'], 0)
+                    st.dataframe(df_summary.style.format({'整体ROI': '{:.2f}', '总花费(元)': '{:,.0f}', '净成交额(元)': '{:,.0f}'}), hide_index=True)
+                else:
+                     st.info("数据不完整，无法显示摘要。")
 
-                st.markdown("### 2. 深度运营分析")
-                col_c3, col_c4 = st.columns(2)
-                
-                with col_c3:
-                    df_shop = df_promo.groupby('店铺').agg({'总花费(元)':'sum', '净成交额(元)':'sum'}).reset_index()
-                    df_shop['ROI'] = np.where(df_shop['总花费(元)']>0, df_shop['净成交额(元)']/df_shop['总花费(元)'], 0)
-                    fig3 = px.bar(df_shop, x='店铺', y='ROI', color='店铺', title='各店铺投产比 (ROI) 对比', text_auto='.2f')
-                    st.plotly_chart(fig3, use_container_width=True)
-                
-                with col_c4:
-                    df_cpl = df_promo.groupby('月份')['询单成本(元/个)'].mean().reset_index()
-                    fig4 = px.line(df_cpl, x='月份', y='询单成本(元/个)', title='平均询单成本 (CPL) 趋势', markers=True)
-                    st.plotly_chart(fig4, use_container_width=True)
+                if not df_summary.empty and '总花费(元)' in df_summary.columns and '净成交额(元)' in df_summary.columns:
+                    col_c1, col_c2 = st.columns(2)
+                    with col_c1:
+                        fig1 = px.bar(df_summary, x='月份', y=['净成交额(元)', '总花费(元)'], barmode='group', 
+                                      title='投入产出对比 (GMV vs Cost)', labels={'value':'金额','variable':'指标'})
+                        st.plotly_chart(fig1, use_container_width=True)
+                    
+                    with col_c2:
+                        fig2 = px.line(df_summary, x='月份', y='整体ROI', title='整体净投产比 (ROI) 趋势', markers=True)
+                        st.plotly_chart(fig2, use_container_width=True)
 
-                st.markdown("### 3. 数据明细表")
-                st.dataframe(df_promo, hide_index=True, use_container_width=True)
+                    st.markdown("### 2. 深度运营分析")
+                    col_c3, col_c4 = st.columns(2)
+                    
+                    with col_c3:
+                        df_shop = df_promo.groupby('店铺').agg({'总花费(元)':'sum', '净成交额(元)':'sum'}).reset_index()
+                        df_shop['ROI'] = np.where(df_shop['总花费(元)']>0, df_shop['净成交额(元)']/df_shop['总花费(元)'], 0)
+                        fig3 = px.bar(df_shop, x='店铺', y='ROI', color='店铺', title='各店铺投产比 (ROI) 对比', text_auto='.2f')
+                        st.plotly_chart(fig3, use_container_width=True)
+                    
+                    with col_c4:
+                        if '询单成本(元/个)' in df_promo.columns:
+                            df_cpl = df_promo.groupby('月份')['询单成本(元/个)'].mean().reset_index()
+                            fig4 = px.line(df_cpl, x='月份', y='询单成本(元/个)', title='平均询单成本 (CPL) 趋势', markers=True)
+                            st.plotly_chart(fig4, use_container_width=True)
+                        else:
+                            st.info("缺少 '询单成本(元/个)' 列，无法绘制 CPL 趋势图。")
+
+                    st.markdown("### 3. 数据明细表")
+                    st.dataframe(df_promo, hide_index=True, use_container_width=True)
                 
             else:
                 st.info("暂无推广数据，请先录入。")
