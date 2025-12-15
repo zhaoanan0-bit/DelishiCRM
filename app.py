@@ -9,7 +9,7 @@ import io
 import os 
 
 # --- 配置与数据初始化 ---
-# 🚨 关键修复：使用内存数据库，确保在 Streamlit Cloud 上稳定运行
+# 🚨 保持不变：使用内存数据库，确保在 Streamlit Cloud 上稳定运行
 DB_FILE = ':memory:' 
 PROMO_DB_FILE = ':memory:'
 USER_DB_FILE = ':memory:'
@@ -68,8 +68,9 @@ REQUIRED_IMPORT_COLUMNS = [
 ]
 
 # --- 数据库连接函数（全部使用内存模式）---
+
 def get_user_conn():
-    # 🚨 关键修复：每次连接都确保表结构和初始数据存在
+    # 🚨 保持不变：用户数据库初始化逻辑已整合到连接函数中
     conn = sqlite3.connect(USER_DB_FILE)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS users (
@@ -91,14 +92,69 @@ def get_user_conn():
 
 
 def get_crm_conn():
-    return sqlite3.connect(DB_FILE)
+    # 🚨 关键修复：将 CRM 客户表创建逻辑移入连接函数中
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS sales (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        date TEXT,
+        sales_rep TEXT,
+        customer_name TEXT,
+        phone TEXT,              
+        source TEXT,             
+        shop_name TEXT,
+        unit_price REAL,
+        area REAL,
+        site_type TEXT,
+        status TEXT,
+        is_construction TEXT,
+        construction_fee REAL,
+        material_fee REAL,
+        shipping_fee REAL,
+        purchase_intent TEXT,
+        total_amount REAL,
+        follow_up_history TEXT,  
+        sample_no TEXT,
+        order_no TEXT,
+        last_follow_up_date TEXT, 
+        next_follow_up_date TEXT   
+    )''')
+    conn.commit()
+    return conn
 
 def get_promo_conn():
-    return sqlite3.connect(PROMO_DB_FILE)
+    # 🚨 关键修复：将推广数据表创建逻辑移入连接函数中
+    conn = sqlite3.connect(PROMO_DB_FILE)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS promotions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        month TEXT,
+        shop TEXT,
+        promo_type TEXT,
+        total_spend REAL,
+        trans_spend REAL,
+        net_gmv REAL,
+        net_roi REAL,
+        cpa_net REAL,
+        inquiry_count INTEGER,
+        inquiry_spend REAL,
+        cpl REAL,
+        note TEXT
+    )''')
+    conn.commit()
+    return conn
+
+
+# --- 数据库函数 (初始化，现为空) ---
+# 🚨 保持不变：这些函数现在只是为了兼容 main() 中的调用而保留，实际初始化逻辑已转移。
+def init_db():
+    pass
+
+def init_promo_db():
+    pass
 
 
 # --- 数据库函数 (用户管理) ---
-# 🚨 移除了 init_user_db()，其功能已被 get_user_conn() 吸收。
 
 def get_all_users():
     conn = get_user_conn()
@@ -137,35 +193,7 @@ def get_display_name_to_username_map():
     return df.set_index('display_name')['username'].to_dict()
 
 # --- 数据库函数 (CRM 客户数据) ---
-def init_db():
-    conn = get_crm_conn()
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS sales (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        date TEXT,
-        sales_rep TEXT,
-        customer_name TEXT,
-        phone TEXT,              
-        source TEXT,             
-        shop_name TEXT,
-        unit_price REAL,
-        area REAL,
-        site_type TEXT,
-        status TEXT,
-        is_construction TEXT,
-        construction_fee REAL,
-        material_fee REAL,
-        shipping_fee REAL,
-        purchase_intent TEXT,
-        total_amount REAL,
-        follow_up_history TEXT,  
-        sample_no TEXT,
-        order_no TEXT,
-        last_follow_up_date TEXT, 
-        next_follow_up_date TEXT   
-    )''')
-    conn.commit()
-    conn.close()
+# init_db() 已移到 get_crm_conn() 中
 
 def get_data(rename_cols=False):
     conn = get_crm_conn()
@@ -189,7 +217,7 @@ def add_data(data):
     conn.commit()
     conn.close()
 
-# 🚨 新增：批量导入功能
+# 批量导入功能
 def import_data_from_excel(df_imported):
     conn = get_crm_conn()
     c = conn.cursor()
@@ -252,7 +280,6 @@ def import_data_from_excel(df_imported):
         return False, f"数据库写入失败：{e}"
 
 
-# ... (其他 CRUD 函数保持不变) ...
 def get_single_record(record_id):
     conn = get_crm_conn()
     c = conn.cursor()
@@ -267,7 +294,7 @@ def get_single_record(record_id):
 def admin_update_data(record_id, data):
     conn = get_crm_conn()
     c = conn.cursor()
-    # 🚨 更改逻辑：总金额不再包含运费
+    # 总金额不再包含运费
     total_amount = (data['unit_price'] * data['area']) + data['construction_fee'] + data['material_fee'] 
     
     c.execute('''UPDATE sales SET
@@ -326,7 +353,7 @@ def check_customer_exist(name, phone):
     conn.close()
     return result[0] if result else None
 
-# --- 管理员功能：批量修复单价/面积互换 ---
+# 管理员功能：批量修复单价/面积互换
 def admin_fix_area_price_swap():
     conn = get_crm_conn()
     c = conn.cursor()
@@ -334,7 +361,7 @@ def admin_fix_area_price_swap():
     # 1. 临时交换 unit_price 和 area
     c.execute("UPDATE sales SET unit_price = area, area = unit_price")
     
-    # 2. 重新计算 total_amount (🚨 更改逻辑：不包含运费)
+    # 2. 重新计算 total_amount (不包含运费)
     c.execute("""
         UPDATE sales 
         SET total_amount = (unit_price * area) + construction_fee + material_fee
@@ -350,26 +377,7 @@ def admin_fix_area_price_swap():
     return rows_affected
 
 # --- 数据库函数 (推广数据) ---
-def init_promo_db():
-    conn = get_promo_conn()
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS promotions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        month TEXT,
-        shop TEXT,
-        promo_type TEXT,
-        total_spend REAL,
-        trans_spend REAL,
-        net_gmv REAL,
-        net_roi REAL,
-        cpa_net REAL,
-        inquiry_count INTEGER,
-        inquiry_spend REAL,
-        cpl REAL,
-        note TEXT
-    )''')
-    conn.commit()
-    conn.close()
+# init_promo_db() 已移到 get_promo_conn() 中
 
 def add_promo_data(data):
     conn = get_promo_conn()
@@ -387,7 +395,7 @@ def get_promo_data(rename_cols=False):
     conn.close()
         
     if rename_cols:
-        # 🚨 确保只重命名存在的列
+        # 确保只重命名存在的列
         valid_rename_map = {k: v for k, v in PROMO_COL_MAP.items() if k in df.columns}
         df.rename(columns=valid_rename_map, inplace=True)
     return df
@@ -424,7 +432,8 @@ def check_password():
 # --- 主程序 ---
 def main():
     st.set_page_config(page_title="CRM运营全能版", layout="wide")
-    # 🚨 关键修复：移除了 init_user_db() 的调用。
+    
+    # 🚨 保持不变：调用初始化函数，但实际逻辑已在 get_conn 中
     init_db()
     init_promo_db()
 
@@ -514,7 +523,7 @@ def main():
                      next_fup = st.date_input("🚨 计划下次跟进", datetime.date.today() + datetime.timedelta(days=3))
                      first_remark = st.text_area("首次沟通记录")
                  
-                 # 🚨 预估总金额不含运费
+                 # 预估总金额不含运费
                  preview_total = (unit_price * area) + const_fee + mat_fee
                  st.caption(f"💰 **预估总金额** (不含运费): **{preview_total:,.2f}** 元")
                  st.caption(f"🚚 运费: {shipping_fee:,.2f} 元 | 实际总价(含运): **{(preview_total + shipping_fee):,.2f}** 元")
@@ -531,7 +540,7 @@ def main():
                              rep_display_name = user_map.get(existing_rep, existing_rep)
                              st.error(f"❌ 录入失败！该客户已存在，目前由 **{rep_display_name}** 负责。")
                          else:
-                             # 🚨 calc_total 不含运费
+                             # calc_total 不含运费
                              calc_total = (unit_price * area) + const_fee + mat_fee
                              log_entry = f"[{datetime.date.today()} {current_display_name}]: 首次录入。{first_remark}"
                              
@@ -696,7 +705,7 @@ def main():
                  display_cols = list(CRM_COL_MAP.values()) 
                  df_display = df_final[[c for c in display_cols if c in df_final.columns]].copy()
 
-                 # 🚨 最终显示
+                 # 最终显示
                  st.dataframe(
                      df_display,
                      hide_index=True, 
@@ -827,7 +836,7 @@ def main():
             # 侧边栏：目标设定
             st.sidebar.markdown("---")
             target_revenue = st.sidebar.number_input("🎯 本月业绩目标 (元)", min_value=10000, value=100000, step=5000, key="target_rev")
-            # 🚨 新增面积目标
+            # 新增面积目标
             target_area = st.sidebar.number_input("📐 本月面积目标 (㎡)", min_value=100.0, value=500.0, step=10.0, key="target_area")
             
             # 获取数据并转换为中文列名
@@ -841,7 +850,7 @@ def main():
                 df['辅料费(元)'] = pd.to_numeric(df['辅料费(元)'], errors='coerce').fillna(0)
                 df['平方数(㎡)'] = pd.to_numeric(df['平方数(㎡)'], errors='coerce').fillna(0)
                 
-                # 毛利计算 (🚨 总金额不含运费，所以毛利 = 总金额 - 施工费 - 辅料费)
+                # 毛利计算 (总金额不含运费 - 施工费 - 辅料费)
                 df['毛利'] = df['预估总金额(元)'] - df['施工费(元)'] - df['辅料费(元)'] 
                 df['录入日期'] = pd.to_datetime(df['录入日期'], errors='coerce')
                 df['月度'] = df['录入日期'].dt.strftime('%Y-%m')
@@ -859,7 +868,7 @@ def main():
                 # 筛选本月已成交数据
                 df_achieved_monthly = df_achieved[df_achieved['成交月'] == current_month]
 
-                # 🚨 KPI 目标计算：仅使用已成交数据
+                # KPI 目标计算：仅使用已成交数据
                 monthly_sales = df_achieved_monthly['预估总金额(元)'].sum()
                 monthly_area = df_achieved_monthly['平方数(㎡)'].sum() 
 
@@ -1045,7 +1054,7 @@ def main():
                 # df_promo 此时已经是中文列名
                 num_cols = ['总花费(元)', '成交花费(元)', '净成交额(元)', '净投产比(ROI)', '每笔净成交花费(元)', '询单花费(元)', '询单成本(元/个)']
                 for c in num_cols: 
-                     # 🚨 修复 Key Error: 检查列是否存在
+                     # 检查列是否存在
                      if c in df_promo.columns:
                          df_promo[c] = pd.to_numeric(df_promo[c], errors='coerce').fillna(0)
                 if '询单量' in df_promo.columns:
@@ -1053,13 +1062,12 @@ def main():
 
                 st.markdown("### 1. 核心指标月度趋势")
                 
-                # 🚨 修复 Key Error: 聚合前检查列是否存在
+                # 聚合前检查列是否存在
                 agg_cols = [c for c in ['总花费(元)', '净成交额(元)', '询单量'] if c in df_promo.columns]
                 
                 if '月份' in df_promo.columns and agg_cols:
                     df_summary = df_promo.groupby('月份')[agg_cols].sum().reset_index().sort_values('月份')
                 else:
-                    # 如果缺少关键列，则无法计算趋势
                     st.info("推广数据表缺少关键列，无法生成图表。请检查录入的数据。")
                     df_summary = pd.DataFrame(columns=['月份', '总花费(元)', '净成交额(元)', '询单量'])
 
