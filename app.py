@@ -8,10 +8,16 @@ import numpy as np
 import io
 
 # --- 配置与数据初始化 ---
-DB_FILE = 'crm_data.db'
-PROMO_DB_FILE = 'promo_data.db'
-USER_DB_FILE = 'user_management.db'
+# 🚨 修复 Streamlit Cloud 部署问题：将数据库文件路径指向临时目录或缓存目录
+import os 
+# 优先使用 HOME 目录，如果无法使用，则使用当前目录
+DB_PATH = os.environ.get('HOME', '.') 
+DB_FILE = os.path.join(DB_PATH, 'crm_data.db')
+PROMO_DB_FILE = os.path.join(DB_PATH, 'promo_data.db')
+USER_DB_FILE = os.path.join(DB_PATH, 'user_management.db')
+
 DAYS_FOR_TRANSFER = 20 
+# ...
 
 # 1. 初始用户账号配置
 INITIAL_USERS = {
@@ -1064,3 +1070,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
