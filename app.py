@@ -705,7 +705,7 @@ def main():
                  display_cols = list(CRM_COL_MAP.values()) 
                  df_display = df_final[[c for c in display_cols if c in df_final.columns]].copy()
 
-                 # 最终显示
+                 # 🚨 最终显示
                  st.dataframe(
                      df_display,
                      hide_index=True, 
@@ -713,121 +713,122 @@ def main():
                      column_config=st_col_config
                  )
 
-                 # --- 管理员功能区 ---
-                 if user_role == 'admin':
-                     st.markdown("---")
-                     st.subheader("🛠️ 管理员操作区")
+             # 🚨 关键修复：将管理员功能区从 if not df.empty 块中移出，使其始终可见
+             # --- 管理员功能区 ---
+             if user_role == 'admin':
+                 st.markdown("---")
+                 st.subheader("🛠️ 管理员操作区")
+                 
+                 # 导入功能集成在这里
+                 with st.expander("📥 批量导入客户数据 (Excel/CSV)"):
+                     st.warning("导入前请注意：导入文件需**完全匹配**以下所有列名，否则导入会失败！")
+                     st.markdown(f"**必填列名:** `{', '.join(REQUIRED_IMPORT_COLUMNS)}`")
                      
-                     # 导入功能集成在这里
-                     with st.expander("📥 批量导入客户数据 (Excel/CSV)"):
-                         st.warning("导入前请注意：导入文件需**完全匹配**以下所有列名，否则导入会失败！")
-                         st.markdown(f"**必填列名:** `{', '.join(REQUIRED_IMPORT_COLUMNS)}`")
-                         
-                         uploaded_file = st.file_uploader("选择您的 Excel/CSV 文件", type=['xlsx', 'csv'])
-                         
-                         if uploaded_file is not None:
-                             try:
-                                 # 自动识别文件类型
-                                 if uploaded_file.name.endswith(('.csv', '.txt')):
-                                     # 尝试使用GBK/utf-8解码，增强兼容性
-                                     try:
-                                         df_import = pd.read_csv(uploaded_file, encoding='utf-8')
-                                     except UnicodeDecodeError:
-                                         uploaded_file.seek(0) # 重置文件指针
-                                         df_import = pd.read_csv(uploaded_file, encoding='gbk')
-
-                                 else: # 默认为 Excel
-                                     df_import = pd.read_excel(uploaded_file)
-                                 
-                                 st.success("文件读取成功！请预览数据并确认导入。")
-                                 st.dataframe(df_import.head())
-                                 
-                                 if st.button("🚀 确认导入并写入数据库"):
-                                     success, result = import_data_from_excel(df_import)
-                                     if success:
-                                         st.success(f"🎉 导入成功！共导入 {result} 条记录。")
-                                         st.balloons()
-                                         st.rerun()
-                                     else:
-                                         st.error(f"导入失败！请检查文件格式和列名。错误信息: {result}")
-                                         
-                             except Exception as e:
-                                 st.error(f"读取文件失败，请确保格式正确且编码为 UTF-8 (如果是 CSV)。错误: {e}")
-
-
-                     col_user, col_del, col_edit = st.columns(3)
+                     uploaded_file = st.file_uploader("选择您的 Excel/CSV 文件", type=['xlsx', 'csv'])
                      
-                     with col_user:
-                         with st.expander("👤 用户管理"):
-                             with st.form("add_user"):
-                                 nu = st.text_input("用户名")
-                                 npw = st.text_input("密码", type="password")
-                                 ndn = st.text_input("中文名")
-                                 nr = st.selectbox("角色", ['user', 'admin'])
-                                 if st.form_submit_button("添加"):
-                                     if add_new_user(nu, npw, nr, ndn):
-                                         st.success("成功")
-                                         st.rerun()
-                                     else: st.error("失败")
-                             st.dataframe(get_all_users(), hide_index=True)
+                     if uploaded_file is not None:
+                         try:
+                             # 自动识别文件类型
+                             if uploaded_file.name.endswith(('.csv', '.txt')):
+                                 # 尝试使用GBK/utf-8解码，增强兼容性
+                                 try:
+                                     df_import = pd.read_csv(uploaded_file, encoding='utf-8')
+                                 except UnicodeDecodeError:
+                                     uploaded_file.seek(0) # 重置文件指针
+                                     df_import = pd.read_csv(uploaded_file, encoding='gbk')
 
-                     with col_del:
-                         with st.expander("🗑️ 删除记录"):
-                             d_id = st.number_input("ID", min_value=1, key="del_id")
-                             if st.button("删除"):
-                                 delete_data(d_id)
-                                 st.success("已删除")
-                                 st.rerun()
-
-                     with col_edit:
-                         with st.expander("📝 修改基本信息(不含运费)"):
-                             u_id = st.number_input("ID", min_value=1, key="edit_id")
-                             if st.button("加载"):
-                                 record = get_single_record(u_id) # 获取的是英文列名数据
-                                 if record: 
-                                     st.session_state['edit_record'] = record
-                                     st.success("记录已加载，请修改并提交。")
-                                 else: st.error("不存在")
+                             else: # 默认为 Excel
+                                 df_import = pd.read_excel(uploaded_file)
                              
-                             # 注意：这里 record['key'] 依然是英文数据库列名
-                             if 'edit_record' in st.session_state and st.session_state['edit_record']['id'] == u_id:
-                                 record = st.session_state['edit_record']
-                                 with st.form("admin_edit"):
-                                     nn = st.text_input("客户名", record['customer_name'])
-                                     nph = st.text_input("电话", record['phone'])
-                                     # 使用中文名作为 key，方便理解
-                                     ns = st.selectbox(CRM_COL_MAP['source'], SOURCE_OPTIONS, index=SOURCE_OPTIONS.index(record['source']) if record['source'] in SOURCE_OPTIONS else 0)
-                                     nshop = st.selectbox(CRM_COL_MAP['shop_name'], SHOP_OPTIONS, index=SHOP_OPTIONS.index(record['shop_name']) if record['shop_name'] in SHOP_OPTIONS else 0)
-                                     nsite = st.selectbox(CRM_COL_MAP['site_type'], SITE_OPTIONS, index=SITE_OPTIONS.index(record['site_type']) if record['site_type'] in SITE_OPTIONS else 0)
-                                     nup = st.number_input(CRM_COL_MAP['unit_price'], record['unit_price'])
-                                     na = st.number_input(CRM_COL_MAP['area'], record['area'])
-                                     nic = st.selectbox(CRM_COL_MAP['is_construction'], ["否","是"], index=["否","是"].index(record['is_construction']))
-                                     ncf = st.number_input(CRM_COL_MAP['construction_fee'], record['construction_fee'])
-                                     nmf = st.number_input(CRM_COL_MAP['material_fee'], record['material_fee'])
-                                     nsf = st.number_input(CRM_COL_MAP['shipping_fee'], record.get('shipping_fee', 0.0))
+                             st.success("文件读取成功！请预览数据并确认导入。")
+                             st.dataframe(df_import.head())
+                             
+                             if st.button("🚀 确认导入并写入数据库"):
+                                 success, result = import_data_from_excel(df_import)
+                                 if success:
+                                     st.success(f"🎉 导入成功！共导入 {result} 条记录。")
+                                     st.balloons()
+                                     st.rerun()
+                                 else:
+                                     st.error(f"导入失败！请检查文件格式和列名。错误信息: {result}")
                                      
-                                     if st.form_submit_button("更新"):
-                                         udata = {
-                                             'customer_name': nn, 'phone': nph, 'source': ns,
-                                             'shop_name': nshop, 'unit_price': nup, 'area': na, 
-                                             'site_type': nsite, 'is_construction': nic, 
-                                             'construction_fee': ncf, 'material_fee': nmf, 'shipping_fee': nsf,
-                                             'status': record['status'], 'purchase_intent': record['purchase_intent']
-                                         }
-                                         admin_update_data(u_id, udata)
-                                         del st.session_state['edit_record']
-                                         st.success("已更新")
-                                         st.rerun()
+                         except Exception as e:
+                             st.error(f"读取文件失败，请确保格式正确且编码为 UTF-8 (如果是 CSV)。错误: {e}")
+
+
+                 col_user, col_del, col_edit = st.columns(3)
+                 
+                 with col_user:
+                     with st.expander("👤 用户管理"):
+                         with st.form("add_user"):
+                             nu = st.text_input("用户名")
+                             npw = st.text_input("密码", type="password")
+                             ndn = st.text_input("中文名")
+                             nr = st.selectbox("角色", ['user', 'admin'])
+                             if st.form_submit_button("添加"):
+                                 if add_new_user(nu, npw, nr, ndn):
+                                     st.success("成功")
+                                     st.rerun()
+                                 else: st.error("失败")
+                         st.dataframe(get_all_users(), hide_index=True)
+
+                 with col_del:
+                     with st.expander("🗑️ 删除记录"):
+                         d_id = st.number_input("ID", min_value=1, key="del_id")
+                         if st.button("删除"):
+                             delete_data(d_id)
+                             st.success("已删除")
+                             st.rerun()
+
+                 with col_edit:
+                     with st.expander("📝 修改基本信息(不含运费)"):
+                         u_id = st.number_input("ID", min_value=1, key="edit_id")
+                         if st.button("加载"):
+                             record = get_single_record(u_id) # 获取的是英文列名数据
+                             if record: 
+                                 st.session_state['edit_record'] = record
+                                 st.success("记录已加载，请修改并提交。")
+                             else: st.error("不存在")
+                         
+                         # 注意：这里 record['key'] 依然是英文数据库列名
+                         if 'edit_record' in st.session_state and st.session_state['edit_record']['id'] == u_id:
+                             record = st.session_state['edit_record']
+                             with st.form("admin_edit"):
+                                 nn = st.text_input("客户名", record['customer_name'])
+                                 nph = st.text_input("电话", record['phone'])
+                                 # 使用中文名作为 key，方便理解
+                                 ns = st.selectbox(CRM_COL_MAP['source'], SOURCE_OPTIONS, index=SOURCE_OPTIONS.index(record['source']) if record['source'] in SOURCE_OPTIONS else 0)
+                                 nshop = st.selectbox(CRM_COL_MAP['shop_name'], SHOP_OPTIONS, index=SHOP_OPTIONS.index(record['shop_name']) if record['shop_name'] in SHOP_OPTIONS else 0)
+                                 nsite = st.selectbox(CRM_COL_MAP['site_type'], SITE_OPTIONS, index=SITE_OPTIONS.index(record['site_type']) if record['site_type'] in SITE_OPTIONS else 0)
+                                 nup = st.number_input(CRM_COL_MAP['unit_price'], record['unit_price'])
+                                 na = st.number_input(CRM_COL_MAP['area'], record['area'])
+                                 nic = st.selectbox(CRM_COL_MAP['is_construction'], ["否","是"], index=["否","是"].index(record['is_construction']))
+                                 ncf = st.number_input(CRM_COL_MAP['construction_fee'], record['construction_fee'])
+                                 nmf = st.number_input(CRM_COL_MAP['material_fee'], record['material_fee'])
+                                 nsf = st.number_input(CRM_COL_MAP['shipping_fee'], record.get('shipping_fee', 0.0))
+                                 
+                                 if st.form_submit_button("更新"):
+                                     udata = {
+                                         'customer_name': nn, 'phone': nph, 'source': ns,
+                                         'shop_name': nshop, 'unit_price': nup, 'area': na, 
+                                         'site_type': nsite, 'is_construction': nic, 
+                                         'construction_fee': ncf, 'material_fee': nmf, 'shipping_fee': nsf,
+                                         'status': record['status'], 'purchase_intent': record['purchase_intent']
+                                     }
+                                     admin_update_data(u_id, udata)
+                                     del st.session_state['edit_record']
+                                     st.success("已更新")
+                                     st.rerun()
                      
-                     # --- 修复功能 ---
-                     st.markdown("---")
-                     with st.expander("🚨 数据库维护工具"):
-                         if st.button("🔄 修复单价/面积数据互换 (所有记录)"):
-                             st.warning("⚠️ 警告：此操作将批量交换所有记录的单价和面积，并重算总金额（不含运费）。请确认执行！")
-                             if st.button("🔥 确认执行修复操作"):
-                                 rows = admin_fix_area_price_swap()
-                                 st.success(f"🎉 修复完成！共影响 {rows} 条记录的单价、面积和总金额（不含运费）。")
-                                 st.rerun()
+                 # --- 修复功能 ---
+                 st.markdown("---")
+                 with st.expander("🚨 数据库维护工具"):
+                     if st.button("🔄 修复单价/面积数据互换 (所有记录)"):
+                         st.warning("⚠️ 警告：此操作将批量交换所有记录的单价和面积，并重算总金额（不含运费）。请确认执行！")
+                         if st.button("🔥 确认执行修复操作"):
+                             rows = admin_fix_area_price_swap()
+                             st.success(f"🎉 修复完成！共影响 {rows} 条记录的单价、面积和总金额（不含运费）。")
+                             st.rerun()
 
         # 3. 销售分析页面 
         elif choice == "📈 销售分析看板":
