@@ -381,40 +381,92 @@ def main():
                                 else: st.error(msg)
                             except Exception as e: st.error(f"错误: {e}")
 
-        # 3. 销售分析 (保留原貌)
+       # 3. 销售分析 (V10.0 - 修复目标输入和成交逻辑)
         elif choice == "📈 销售分析看板":
-            st.subheader("📈 销售数据分析")
+            st.subheader("📈 核心销售数据分析 (仅统计 [已完结/已收款] 客户)")
             df = get_data(rename_cols=True)
+            
             if df.empty:
                 st.warning("暂无数据")
             else:
-                target = st.sidebar.number_input("本月目标", 100000)
+                st.sidebar.markdown("---")
+                st.sidebar.markdown("### 🎯 目标设置")
                 
-                # 数据转换
-                num_cols = ['预估总金额(元)', '平方数(㎡)', '运费(元)']
-                for c in num_cols: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+                # --- 修复：添加平方数目标输入 ---
+                target_sales_default = 100000 
+                target_sales = st.sidebar.number_input("💰 本月销售额目标 (元)", value=target_sales_default, min_value=1)
                 
-                total_sales = df['预估总金额(元)'].sum()
-                total_area = df['平方数(㎡)'].sum()
+                target_area_default = 500
+                target_area = st.sidebar.number_input("📐 本月销售面积目标 (㎡)", value=target_area_default, min_value=1)
+                # ------------------------------------
                 
-                k1, k2, k3 = st.columns(3)
-                k1.metric("总销售额", f"¥{total_sales:,.0f}")
-                k2.metric("总面积", f"{total_area:,.0f} ㎡")
-                k3.metric("完成率", f"{min(total_sales/target, 1.0)*100:.1f}%")
+                # --- 1. 数据清洗与筛选 (仅筛选已成交/已收款) ---
                 
-                # 图表
-                c1, c2 = st.columns(2)
-                fig1 = px.pie(df, names='店铺名称', values='预估总金额(元)', title="店铺业绩占比")
-                c1.plotly_chart(fig1, use_container_width=True)
+                # 确保数值列是数字类型
+                num_cols = ['预估总金额(元)', '平方数(㎡)', '运费(元)', '施工费(元)', '辅料费(元)']
+                for c in num_cols: 
+                    # 清理并转换数字，无法转换的设为0
+                    df[c] = pd.to_numeric(df[c].astype(str).str.replace(r'[^\d\.]', '', regex=True), errors='coerce').fillna(0)
                 
-                fig2 = px.bar(df, x='客户来源', y='预估总金额(元)', title="客户来源分析", color='客户来源')
-                c2.plotly_chart(fig2, use_container_width=True)
+                # 筛选出已成交数据
+                df_sold = df[df['跟踪进度'] == '已完结/已收款'].copy()
                 
-                # 龙虎榜
-                st.markdown("#### 🏆 销售龙虎榜")
-                df['对接人'] = df['对接人'].map(user_map).fillna(df['对接人'])
-                rank = df.groupby('对接人')['预估总金额(元)'].sum().reset_index().sort_values('预估总金额(元)', ascending=False)
-                st.dataframe(rank, use_container_width=True, hide_index=True)
+                if df_sold.empty:
+                    st.info("📊 本期尚未有客户达成 [已完结/已收款] 状态，无法进行成交分析。")
+                    
+                else:
+                    # 实际成交数据
+                    total_sales = df_sold['预估总金额(元)'].sum()
+                    total_area = df_sold['平方数(㎡)'].sum()
+                    
+                    # --- 2. KPI 展示 (基于成交数据和双目标) ---
+                    st.markdown("#### ✅ 实际成交关键指标")
+                    k1, k2, k3, k4 = st.columns(4)
+                    
+                    k1.metric("💰 实际总销售额", f"¥{total_sales:,.0f}")
+                    k2.metric("📐 实际销售面积", f"{total_area:,.0f} ㎡")
+                    
+                    # 销售额完成率
+                    sales_completion_rate = min(total_sales / target_sales, 1.0) if target_sales > 0 else 0
+                    k3.metric("📈 金额完成率", f"{sales_completion_rate*100:.1f}%", f"距目标差额: ¥{total_sales - target_sales:,.0f}")
+                    
+                    # 平方数完成率
+                    area_completion_rate = min(total_area / target_area, 1.0) if target_area > 0 else 0
+                    k4.metric("📏 面积完成率", f"{area_completion_rate*100:.1f}%", f"距目标差额: {total_area - target_area:,.0f} ㎡")
+                    
+                    # --- 3. 图表 ---
+                    st.markdown("---")
+                    st.markdown("#### 📈 销售额分布与客户来源分析")
+                    c1, c2 = st.columns(2)
+                    
+                    # 图表1：店铺成交业绩占比
+                    fig1 = px.pie(df_sold, names='店铺名称', values='预估总金额(元)', 
+                                  title="实际成交额 - 店铺占比", hole=.3)
+                    c1.plotly_chart(fig1, use_container_width=True)
+                    
+                    # 图表2：客户来源分析
+                    df_source_sum = df_sold.groupby('客户来源')['预估总金额(元)'].sum().reset_index()
+                    fig2 = px.bar(df_source_sum, x='客户来源', y='预估总金额(元)', 
+                                  title="实际成交额 - 客户来源", color='客户来源', 
+                                  labels={'预估总金额(元)': '成交金额 (元)'})
+                    c2.plotly_chart(fig2, use_container_width=True)
+
+                    # --- 4. 龙虎榜 ---
+                    st.markdown("---")
+                    st.markdown("#### 🏆 销售龙虎榜 (基于实际成交额)")
+                    
+                    # 映射销售代表名字
+                    df_sold['对接人'] = df_sold['对接人'].map(user_map).fillna(df_sold['对接人'])
+                    
+                    # 统计成交额和面积
+                    rank = df_sold.groupby('对接人')[['预估总金额(元)', '平方数(㎡)']].sum().reset_index()
+                    rank = rank.sort_values('预估总金额(元)', ascending=False)
+                    
+                    # 格式化展示
+                    rank['成交总金额'] = rank['预估总金额(元)'].apply(lambda x: f"¥{x:,.0f}")
+                    rank['成交总面积'] = rank['平方数(㎡)'].apply(lambda x: f"{x:,.0f} ㎡")
+                    
+                    st.dataframe(rank[['对接人', '成交总金额', '成交总面积']].rename(columns={'对接人': '销售代表'}), use_container_width=True, hide_index=True)
 
         # 4. 推广看板 (保留原貌)
         elif choice == "🌐 推广数据看板":
