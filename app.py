@@ -253,7 +253,8 @@ def import_data_from_excel(df_imported):
     # 允许 '联系电话' 和 '客户来源' 缺失，但如果是必填，则在此处检查
     
     if '客户名称' not in df_imported.columns:
-        return False, "缺少核心必填列：'客户名称'"
+        # 这个错误会在外部被捕获
+        raise ValueError("缺少核心必填列：'客户名称'")
     
     # 2. 数据清洗和预处理
     df_to_save = df_imported.copy()
@@ -316,6 +317,7 @@ def import_data_from_excel(df_imported):
         return True, len(df_imported)
     except Exception as e:
         conn.close()
+        # V3.0 内部错误捕获：返回数据库写入失败信息
         return False, f"数据库写入失败：{e}"
 
 
@@ -801,20 +803,28 @@ def main():
                              
                      # 只有当 preview 存在时，才显示确认按钮
                      if 'df_import_preview' in st.session_state and st.session_state['df_import_preview'] is not None:
-                         # **将导入按钮放在这里，确保点击时 df_import_preview 是可用的**
+                         # **V4.0 增强错误捕获区域**
                          if st.button("🚀 确认导入并写入数据库"):
                              df_to_process = st.session_state['df_import_preview']
-                             success, result = import_data_from_excel(df_to_process)
                              
-                             if success:
-                                 st.success(f"🎉 导入成功！共导入 {result} 条记录。")
-                                 st.balloons()
-                                 # 清除状态并刷新页面
-                                 del st.session_state['df_import_preview']
-                                 del st.session_state['uploaded_file']
-                                 st.rerun()
-                             else:
-                                 st.error(f"导入失败！请检查文件格式和列名。错误信息: {result}")
+                             # V4.0 关键修复：增加一个外部 try-except 块，捕获所有可能的内部崩溃
+                             try:
+                                 success, result = import_data_from_excel(df_to_process)
+                                 
+                                 if success:
+                                     st.success(f"🎉 导入成功！共导入 {result} 条记录。")
+                                     st.balloons()
+                                     # 清除状态并刷新页面
+                                     del st.session_state['df_import_preview']
+                                     del st.session_state['uploaded_file']
+                                     st.rerun()
+                                 else:
+                                     # result will contain the database error message
+                                     st.error(f"导入失败！请检查文件格式和列名。内部错误信息: {result}")
+                             except Exception as e:
+                                 # 捕获在 import_data_from_excel 内部发生的任何意外崩溃
+                                 st.error(f"❌ 导入过程中发生**致命错误**！程序中断。详细错误：{e}")
+                                 st.warning("请检查您的 CSV/Excel 文件中，'单价'、'平方数'、'施工费'等**数值列**是否含有**无法被清除的文本**。")
                                  
                      elif st.session_state['uploaded_file'] is not None:
                         # 如果文件已上传，但预览失败，提示用户检查
