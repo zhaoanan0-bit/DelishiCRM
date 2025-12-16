@@ -1,0 +1,6 @@
+[server]
+runOnSave = false
+fileWatcherType = "none"
+
+[runner]
+magicEnabled = false
