@@ -9,7 +9,7 @@ import io
 import os 
 
 # --- 配置与数据初始化 ---
-# 🚨 保持不变：使用内存数据库，确保在 Streamlit Cloud 上稳定运行
+# 使用内存数据库，确保在 Streamlit Cloud 上稳定运行
 DB_FILE = ':memory:' 
 PROMO_DB_FILE = ':memory:'
 USER_DB_FILE = ':memory:' # 用户数据库文件
@@ -34,8 +34,8 @@ SITE_OPTIONS = [
     "轮滑场", "壁球馆", "室内滑冰训练辅助区", "部队、公安、消防训练馆", "医院康复科运动治疗室", "老年活动中心", "其他/未分类"
 ]
 SHOP_OPTIONS = ["天猫旗舰店", "拼多多运动店铺", "拼多多旗舰店", "淘宝店铺", "抖音店铺", "线下渠道/其他"]
-STATUS_OPTIONS = ["初次接触", "已寄样", "报价中", "合同流程", "施工中", "已完结/已收款", "流失/搁置"]
-INTENT_OPTIONS = ["高", "中", "低", "已成交", "流失"]
+STATUS_OPTIONS = ["初次接触", "已寄样", "报价中", "合同流程", "施工中", "已完结/已收款", "流失/搁置", "已流失"] # 增加了“已流失”
+INTENT_OPTIONS = ["高", "中", "低", "已成交", "流失", "已放弃"] # 增加了“已放弃”
 SOURCE_OPTIONS = ["自然进店", "拼多多推广", "天猫推广", "老客户转介绍", "其他"]
 PROMO_TYPE_OPTIONS = ["成交收费", "成交加扣", "其他"]
 
@@ -61,11 +61,10 @@ PROMO_COL_MAP = {
 # 中文到英文列名映射（用于导入时转换）
 CN_TO_EN_MAP = {v: k for k, v in CRM_COL_MAP.items()}
 # 导入时必须包含的列（不含 ID，不含自动计算项）
-# **注意：我们增加了 '联系电话' 和 '客户来源' 的容错性，如果不提供，系统会填空。但为了数据完整性，仍推荐包含。
 REQUIRED_IMPORT_COLUMNS = [
     '录入日期', '对接人', '客户名称', '店铺名称', '单价(元/㎡)', '平方数(㎡)', 
     '应用场地', '跟踪进度', '是否施工', '施工费(元)', '辅料费(元)', '运费(元)', '购买意向', 
-    '跟进历史', '寄样单号', '订单号', '上次跟进日期', '计划下次跟进'
+    '跟进历史', '寄样单号', '订单号', '上次跟进日期', '计划下次跟进', '联系电话', '客户来源'
 ]
 # 需要做额外映射的列（原始文件可能存在的列名和系统标准列名的映射）
 COLUMN_REMAP = {
@@ -84,7 +83,12 @@ COLUMN_REMAP = {
     '手机': '联系电话',
     '电话': '联系电话',
     '客户来源': '客户来源',
-    '运费（元）': '运费(元)'
+    '运费（元）': '运费(元)',
+    # V5.0 额外增加的容错映射
+    '单价(元/m²)': '单价(元/㎡)',
+    '平方数(m²)': '平方数(㎡)',
+    '平方数（m²）': '平方数(㎡)',
+    '总金额(元)': '预估总金额(元)',
 }
 # 导入时数据库需要的所有英文列（用于执行 INSERT INTO）
 DATABASE_COLUMNS = [
@@ -249,11 +253,7 @@ def import_data_from_excel(df_imported):
     df_imported.rename(columns=COLUMN_REMAP, inplace=True)
     
     # 检查必填列
-    missing_cols = [col for col in REQUIRED_IMPORT_COLUMNS if col not in df_imported.columns]
-    # 允许 '联系电话' 和 '客户来源' 缺失，但如果是必填，则在此处检查
-    
     if '客户名称' not in df_imported.columns:
-        # 这个错误会在外部被捕获
         raise ValueError("缺少核心必填列：'客户名称'")
     
     # 2. 数据清洗和预处理
@@ -274,22 +274,29 @@ def import_data_from_excel(df_imported):
     # 3. 数据类型和格式转换
     
     # 日期处理 (日期解析失败的将变为 NaT，稍后在 to_sql 时会变成 None 或空字符串)
-    df_to_save['date'] = pd.to_datetime(df_to_save['date'], errors='coerce').dt.strftime('%Y-%m-%d')
-    df_to_save['last_follow_up_date'] = pd.to_datetime(df_to_save['last_follow_up_date'], errors='coerce').dt.strftime('%Y-%m-%d')
-    df_to_save['next_follow_up_date'] = pd.to_datetime(df_to_save['next_follow_up_date'], errors='coerce').dt.strftime('%Y-%m-%d')
-
+    date_cols = ['date', 'last_follow_up_date', 'next_follow_up_date']
+    for col in date_cols:
+        # V5.0 增强：尝试将非标准日期格式转换为标准日期格式
+        df_to_save[col] = df_to_save[col].astype(str).str.replace(r'[^0-9\-\./]', '', regex=True)
+        # 针对 2025.12.1 格式，替换为 2025-12-01
+        df_to_save[col] = df_to_save[col].str.replace(r'\.', '-', regex=True)
+        df_to_save[col] = pd.to_datetime(df_to_save[col], errors='coerce').dt.strftime('%Y-%m-%d')
+        
     # 数值列处理：转换为数字，转换失败（如 '50平'）的将变成 NaN，再填充 0.0
-    num_cols = ['unit_price', 'area', 'construction_fee', 'material_fee', 'shipping_fee']
+    num_cols = ['unit_price', 'area', 'construction_fee', 'material_fee', 'shipping_fee', 'total_amount']
     for col in num_cols:
-        # 尝试去除数值中的非数字字符 (例如去除 '平')
+        # V5.0 增强：尝试去除数值中的所有非数字和小数点字符 (例如去除 '平'、','、'¥')
         df_to_save[col] = df_to_save[col].astype(str).str.replace(r'[^\d\.]', '', regex=True)
+        # V5.0 增强：处理 'NaN' 字符串
+        df_to_save.loc[df_to_save[col].str.lower() == 'nan', col] = 0.0
         df_to_save[col] = pd.to_numeric(df_to_save[col], errors='coerce').fillna(0.0)
 
-    # 4. 计算 total_amount (预估总金额，不含运费)
+    # 4. 计算 total_amount (预估总金额，不含运费) - 导入时重新计算，防止文件中的总金额错误
+    # V5.0 修正：文件中的 '总金额(元)' 是原生的，我们用它来做 total_amount 的初始值，
+    # 但如果单价和面积存在，则重新计算，以防导入的总金额错误。
     df_to_save['total_amount'] = (df_to_save['unit_price'] * df_to_save['area']) + df_to_save['construction_fee'] + df_to_save['material_fee']
     
     # 5. 对接人映射：将中文名转换为 username
-    # 缺失或匹配不上的对接人默认分配给 'admin'
     df_to_save['sales_rep'] = df_to_save['sales_rep'].astype(str).str.strip().apply(lambda x: display_to_user_map.get(x, 'admin'))
     
     # 6. 插入数据库
@@ -317,7 +324,7 @@ def import_data_from_excel(df_imported):
         return True, len(df_imported)
     except Exception as e:
         conn.close()
-        # V3.0 内部错误捕获：返回数据库写入失败信息
+        # 内部错误捕获：返回数据库写入失败信息
         return False, f"数据库写入失败：{e}"
 
 
@@ -418,8 +425,6 @@ def admin_fix_area_price_swap():
     return rows_affected
 
 # --- 数据库函数 (推广数据) ---
-# init_promo_db() 已移到 get_promo_conn() 中
-
 def add_promo_data(data):
     conn = get_promo_conn()
     c = conn.cursor()
@@ -444,7 +449,7 @@ def get_promo_data(rename_cols=False):
 # --- 登录逻辑 ---
 def check_password():
     def password_entered():
-        # 🚨 这里的 get_user_info() 会调用 get_user_conn() 确保表存在
+        # 这里的 get_user_info() 会调用 get_user_conn() 确保表存在
         user_info = get_user_info(st.session_state["username"]) 
         if user_info and st.session_state["password"] == user_info['password']:
             st.session_state["password_correct"] = True
@@ -475,7 +480,7 @@ def check_password():
 def main():
     st.set_page_config(page_title="CRM运营全能版", layout="wide")
     
-    # 🚨 保持不变：调用初始化函数，但实际逻辑已在 get_conn 中
+    # 调用初始化函数，但实际逻辑已在 get_conn 中
     init_db()
     init_promo_db()
 
@@ -488,6 +493,10 @@ def main():
         st.sidebar.title(f"👤 {current_display_name}")
         menu = ["📝 新增销售记录", "📊 数据追踪与查看", "📈 销售分析看板", "🌐 推广数据看板"]
         choice = st.sidebar.radio("菜单", menu)
+        
+        # 初始化 Session State 导入状态标志 V5.0
+        if 'import_status' not in st.session_state:
+            st.session_state['import_status'] = None # None, 'success', 'error', 'pending', 'fatal_error'
         
         # --- 侧边栏：数据导出 ---
         st.sidebar.markdown("---")
@@ -747,7 +756,7 @@ def main():
                  display_cols = list(CRM_COL_MAP.values()) 
                  df_display = df_final[[c for c in display_cols if c in df_final.columns]].copy()
 
-                 # 🚨 最终显示
+                 # 最终显示
                  st.dataframe(
                      df_display,
                      hide_index=True, 
@@ -755,7 +764,6 @@ def main():
                      column_config=st_col_config
                  )
 
-             # 🚨 关键修复：将管理员功能区从 if not df.empty 块中移出，使其始终可见
              # --- 管理员功能区 ---
              if user_role == 'admin':
                  st.markdown("---")
@@ -766,16 +774,16 @@ def main():
                      st.warning("导入前请注意：导入文件需**尽量匹配**系统预设列名，否则数据可能无法正确解析！")
                      st.markdown(f"**核心必填列名:** `客户名称`。**推荐列名:** `{', '.join(REQUIRED_IMPORT_COLUMNS)}`")
                      
-                     # 使用 Streamlit session state 存储 uploaded_file，避免文件重复读取问题
                      if 'uploaded_file' not in st.session_state:
                          st.session_state['uploaded_file'] = None
                          
                      # 重新定义 file_uploader 
                      uploaded_file = st.file_uploader("选择您的 Excel/CSV 文件", type=['xlsx', 'csv'], key="file_upload_widget")
                      
-                     if uploaded_file is not None and st.session_state['uploaded_file'] != uploaded_file:
+                     if uploaded_file is not None and st.session_state.get('uploaded_file') != uploaded_file:
                          # 每次新文件上传或重新加载时，更新 session state
                          st.session_state['uploaded_file'] = uploaded_file
+                         st.session_state['import_status'] = None # 重置状态
                          
                          try:
                              # 尝试读取文件
@@ -799,36 +807,62 @@ def main():
                          except Exception as e:
                              st.error(f"读取文件失败，请确保格式正确且编码为 UTF-8 或 GBK (如果是 CSV)。错误: {e}")
                              st.session_state['df_import_preview'] = None
-                             st.session_state['uploaded_file'] = None # 清空状态以允许重新上传
+                             st.session_state['uploaded_file'] = None
+                             st.session_state['import_status'] = 'error' # 设置读取错误状态
                              
                      # 只有当 preview 存在时，才显示确认按钮
                      if 'df_import_preview' in st.session_state and st.session_state['df_import_preview'] is not None:
-                         # **V4.0 增强错误捕获区域**
+                         
+                         # **V5.0 状态驱动逻辑：第一步**
                          if st.button("🚀 确认导入并写入数据库"):
+                             # 1. 立即设置状态为 'pending'，避免重复点击，并触发 rerun
+                             st.session_state['import_status'] = 'pending'
+                             st.session_state['import_result'] = "正在处理中..."
+                             st.rerun() 
+
+                         # **V5.0 状态驱动逻辑：第二步 (在第二次 rerun 时执行)**
+                         if st.session_state['import_status'] == 'pending':
+                             st.info("数据处理中，请稍候...")
                              df_to_process = st.session_state['df_import_preview']
                              
-                             # V4.0 关键修复：增加一个外部 try-except 块，捕获所有可能的内部崩溃
+                             # 2. 执行导入（放在一个大 try-except 块中，捕获所有 Python 错误）
                              try:
                                  success, result = import_data_from_excel(df_to_process)
                                  
                                  if success:
-                                     st.success(f"🎉 导入成功！共导入 {result} 条记录。")
-                                     st.balloons()
-                                     # 清除状态并刷新页面
+                                     # 3. 导入成功：更新状态和结果
+                                     st.session_state['import_status'] = 'success'
+                                     st.session_state['import_result'] = result # 导入的行数
+                                     # 导入成功后清除预览数据和文件状态
                                      del st.session_state['df_import_preview']
                                      del st.session_state['uploaded_file']
-                                     st.rerun()
                                  else:
-                                     # result will contain the database error message
-                                     st.error(f"导入失败！请检查文件格式和列名。内部错误信息: {result}")
+                                     # 4. 导入失败（数据库/数据清洗问题）：更新状态和结果
+                                     st.session_state['import_status'] = 'error'
+                                     st.session_state['import_result'] = result
+                                     
                              except Exception as e:
-                                 # 捕获在 import_data_from_excel 内部发生的任何意外崩溃
-                                 st.error(f"❌ 导入过程中发生**致命错误**！程序中断。详细错误：{e}")
-                                 st.warning("请检查您的 CSV/Excel 文件中，'单价'、'平方数'、'施工费'等**数值列**是否含有**无法被清除的文本**。")
-                                 
-                     elif st.session_state['uploaded_file'] is not None:
-                        # 如果文件已上传，但预览失败，提示用户检查
-                        st.warning("文件已选择，但读取失败。请检查文件内容是否正确。")
+                                 # 5. 致命崩溃：更新状态和结果
+                                 st.session_state['import_status'] = 'fatal_error'
+                                 st.session_state['import_result'] = f"程序发生致命中断！详细错误：{e}"
+                             
+                             # 6. 无论成功失败，都强制重新运行一次，以显示结果
+                             st.rerun() 
+                             
+                     # 7. 根据状态显示最终结果
+                     if st.session_state['import_status'] == 'success':
+                         st.success(f"🎉 导入成功！共导入 {st.session_state['import_result']} 条记录。")
+                         st.balloons()
+                         st.session_state['import_status'] = None # 清除成功状态，页面恢复正常
+                         
+                     elif st.session_state['import_status'] == 'error':
+                         st.error(f"导入失败！请检查文件格式和列名。内部错误信息: {st.session_state['import_result']}")
+                         st.session_state['import_status'] = None # 清除错误状态
+                         
+                     elif st.session_state['import_status'] == 'fatal_error':
+                         st.error(f"❌ 导入过程中发生**致命错误**！{st.session_state['import_result']}")
+                         st.warning("请检查您的 CSV/Excel 文件中，数值列是否含有**无法被清除的文本**。")
+                         st.session_state['import_status'] = None # 清除致命错误状态
 
 
                  col_user, col_del, col_edit = st.columns(3)
