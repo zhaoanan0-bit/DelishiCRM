@@ -29,7 +29,8 @@ SITE_OPTIONS = [
     "轮滑场", "壁球馆", "室内滑冰训练辅助区", "部队、公安、消防训练馆", "医院康复科运动治疗室", "老年活动中心", "其他/未分类"
 ]
 SHOP_OPTIONS = ["天猫旗舰店", "拼多多运动店铺", "拼多多旗舰店", "淘宝店铺", "抖音店铺", "线下渠道/其他"]
-STATUS_OPTIONS = ["初次接触", "已寄样", "报价中", "合同流程", "施工中", "已完结/已收款", "流失/搁置", "已流失"]
+# ✅ 修复点 V10.1: 加入 "已签约" 状态，允许手动录入和导入
+STATUS_OPTIONS = ["初次接触", "已寄样", "报价中", "合同流程", "已签约", "施工中", "已完结/已收款", "流失/搁置", "已流失"]
 INTENT_OPTIONS = ["高", "中", "低", "已成交", "流失", "已放弃"]
 SOURCE_OPTIONS = ["自然进店", "拼多多推广", "天猫推广", "老客户转介绍", "其他"]
 PROMO_TYPE_OPTIONS = ["成交收费", "成交加扣", "其他"]
@@ -54,7 +55,7 @@ PROMO_COL_MAP = {
 CN_TO_EN_MAP = {v: k for k, v in CRM_COL_MAP.items()}
 DATABASE_COLUMNS = list(CRM_COL_MAP.keys())[1:] # 排除ID
 
-# 列名清洗映射
+# 列名清洗映射 (用于 Excel/CSV 导入，增加容错)
 COLUMN_REMAP = {
     '日期': '录入日期', '店铺名字': '店铺名称', '单价（元/㎡）': '单价(元/㎡)', '平方数（㎡）': '平方数(㎡)',
     '应用场地 ': '应用场地', '跟踪进度 ': '跟踪进度', '是否施工 ': '是否施工',
@@ -65,7 +66,9 @@ COLUMN_REMAP = {
 }
 
 # --- 数据库连接函数 ---
+@st.cache_resource
 def get_conn():
+    # 使用 st.cache_resource 确保连接只创建一次，提高性能
     return sqlite3.connect(DB_FILE, check_same_thread=False)
 
 def init_db():
@@ -99,7 +102,7 @@ def init_db():
         inquiry_spend REAL, cpl REAL, note TEXT
     )''')
     conn.commit()
-    conn.close()
+    # conn.close() # 移除 conn.close() 因为使用了 @st.cache_resource
 
 # --- 核心 CRUD 函数 ---
 def get_data(rename_cols=False):
@@ -109,7 +112,6 @@ def get_data(rename_cols=False):
         if rename_cols: df.rename(columns=CRM_COL_MAP, inplace=True)
         return df
     except: return pd.DataFrame()
-    finally: conn.close()
 
 def add_data(data):
     conn = get_conn()
@@ -117,7 +119,6 @@ def add_data(data):
     placeholders = ', '.join(['?'] * len(DATABASE_COLUMNS))
     c.execute(f"INSERT INTO sales ({', '.join(DATABASE_COLUMNS)}) VALUES ({placeholders})", data)
     conn.commit()
-    conn.close()
 
 def update_follow_up(record_id, new_log, next_date, new_status, new_intent):
     conn = get_conn()
@@ -129,33 +130,28 @@ def update_follow_up(record_id, new_log, next_date, new_status, new_intent):
         WHERE id = ?
     """, (f"\n{new_log}", datetime.date.today().isoformat(), next_date, new_status, new_intent, record_id))
     conn.commit()
-    conn.close()
 
 def get_user_info(username):
     conn = get_conn()
     c = conn.cursor()
     c.execute("SELECT password, role, display_name FROM users WHERE username=?", (username,))
     res = c.fetchone()
-    conn.close()
     if res: return {'password': res[0], 'role': res[1], 'display_name': res[2]}
     return None
 
 def get_user_map():
     conn = get_conn()
     df = pd.read_sql_query("SELECT username, display_name FROM users", conn)
-    conn.close()
     return df.set_index('username')['display_name'].to_dict()
 
 def get_display_name_to_username_map():
     conn = get_conn()
     df = pd.read_sql_query("SELECT username, display_name FROM users", conn)
-    conn.close()
     return df.set_index('display_name')['username'].to_dict()
 
 def get_promo_data(rename_cols=False):
     conn = get_conn()
     df = pd.read_sql_query("SELECT * FROM promotions", conn)
-    conn.close()
     if rename_cols:
         valid_map = {k: v for k, v in PROMO_COL_MAP.items() if k in df.columns}
         df.rename(columns=valid_map, inplace=True)
@@ -169,7 +165,6 @@ def add_promo_data(data):
         net_roi, cpa_net, inquiry_count, inquiry_spend, cpl, note
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', data)
     conn.commit()
-    conn.close()
 
 # 导入功能 (健壮版)
 def import_data_from_excel(df_imported):
@@ -186,9 +181,8 @@ def import_data_from_excel(df_imported):
 
     df_to_save = df_imported.copy()
     # 补全缺失列
-    for cn_col in CN_TO_EN_MAP:
+    for cn_col in CN_TO_EN_MAP.keys():
         if cn_col not in df_to_save.columns:
-             # 根据列名类型给默认值
             is_num_col = any(keyword in cn_col for keyword in ['费', '价', '平', '额'])
             df_to_save[cn_col] = 0.0 if is_num_col else ''
             
@@ -215,8 +209,6 @@ def import_data_from_excel(df_imported):
         return True, len(df_imported)
     except Exception as e:
         return False, str(e)
-    finally:
-        conn.close()
 
 # --- 登录 ---
 def check_password():
@@ -312,6 +304,8 @@ def main():
                         )
                         add_data(data)
                         st.success("录入成功！")
+                        # 提交成功后重新运行，确保数据立即在列表中显示
+                        st.rerun()
 
         # 2. 列表
         elif choice == "📊 数据追踪与查看":
@@ -322,7 +316,13 @@ def main():
             with st.expander("➕ 快速追加跟进"):
                 if not df.empty:
                     df['显示对接人'] = df['对接人'].map(user_map).fillna(df['对接人'])
-                    opts = [f"{r['ID']} - {r['客户名称']} ({r['显示对接人']})" for i, r in df.iterrows()]
+                    # 确保只选择当前用户能跟进的客户
+                    if role == 'user':
+                        df_user_filtered = df[df['对接人'] == current_user_username].copy()
+                        opts = [f"{r['ID']} - {r['客户名称']} ({r['显示对接人']})" for i, r in df_user_filtered.iterrows()]
+                    else:
+                        opts = [f"{r['ID']} - {r['客户名称']} ({r['显示对接人']})" for i, r in df.iterrows()]
+                        
                     sel = st.selectbox("选择客户", opts, key='fup_sel')
                     note = st.text_input("本次跟进情况")
                     next_date = st.date_input("计划下次跟进", datetime.date.today() + datetime.timedelta(days=3))
@@ -378,9 +378,9 @@ def main():
                                 else: st.error(msg)
                             except Exception as e: st.error(f"文件读取错误: {e}")
 
-        # 3. 销售分析 (V10.0 - 修复目标输入和成交逻辑)
+        # 3. 销售分析 (V10.1 - 修复状态筛选，包含已签约)
         elif choice == "📈 销售分析看板":
-            st.subheader("📈 核心销售数据分析 (仅统计 [已完结/已收款] 客户)")
+            st.subheader("📈 核心销售数据分析 (仅统计 [已签约] 或 [已完结/已收款] 客户)")
             df = get_data(rename_cols=True)
             
             if df.empty:
@@ -389,26 +389,26 @@ def main():
                 st.sidebar.markdown("---")
                 st.sidebar.markdown("### 🎯 目标设置")
                 
-                # --- 修复：添加平方数目标输入 ---
+                # --- 金额和面积双目标输入 ---
                 target_sales_default = 100000 
                 target_sales = st.sidebar.number_input("💰 本月销售额目标 (元)", value=target_sales_default, min_value=1)
                 
                 target_area_default = 500
                 target_area = st.sidebar.number_input("📐 本月销售面积目标 (㎡)", value=target_area_default, min_value=1)
-                # ------------------------------------
                 
-                # --- 1. 数据清洗与筛选 (仅筛选已成交/已收款) ---
+                # --- 1. 数据清洗与筛选 ---
                 
-                # 确保数值列是数字类型
                 num_cols = ['预估总金额(元)', '平方数(㎡)', '运费(元)', '施工费(元)', '辅料费(元)']
                 for c in num_cols: 
+                    # 确保数值列是数字，去除杂乱字符
                     df[c] = pd.to_numeric(df[c].astype(str).str.replace(r'[^\d\.]', '', regex=True), errors='coerce').fillna(0)
                 
-                # 筛选出已成交数据
-                df_sold = df[df['跟踪进度'] == '已完结/已收款'].copy()
+                # ✅ 关键修复 V10.1: 筛选同时包括 '已签约' 和 '已完结/已收款'
+                ACQUIRED_STATUSES = ['已签约', '已完结/已收款']
+                df_sold = df[df['跟踪进度'].isin(ACQUIRED_STATUSES)].copy()
                 
                 if df_sold.empty:
-                    st.info("📊 本期尚未有客户达成 [已完结/已收款] 状态，无法进行成交分析。")
+                    st.info("📊 本期尚未有客户达成 [已签约] 或 [已完结/已收款] 状态，无法进行成交分析。")
                     
                 else:
                     # 实际成交数据
@@ -464,7 +464,7 @@ def main():
                     
                     st.dataframe(rank[['对接人', '成交总金额', '成交总面积']].rename(columns={'对接人': '销售代表'}), use_container_width=True, hide_index=True)
 
-        # 4. 推广看板 (保留原貌)
+        # 4. 推广看板 (完整功能)
         elif choice == "🌐 推广数据看板":
             st.subheader("🌐 推广数据")
             dfp = get_promo_data(rename_cols=True)
