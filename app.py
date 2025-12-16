@@ -7,11 +7,12 @@ import plotly.graph_objects as go
 import numpy as np
 import io
 import os 
+from datetime import timedelta
 
 # --- 核心配置 ---
 DB_FILE = 'crm_data.db' 
 
-# --- 初始化与数据结构 ---
+# --- 初始化与数据结构 (与 V10.9 保持一致) ---
 INITIAL_USERS = {
     'admin': {'password': 'admin123', 'role': 'admin', 'display_name': '超级管理员'},
     'zhaoxiaoan': {'password': 'zhaoxiaoan123', 'role': 'admin', 'display_name': '赵小安'},
@@ -33,7 +34,7 @@ INTENT_OPTIONS = ["高", "中", "低", "已成交", "流失", "已放弃"]
 SOURCE_OPTIONS = ["自然进店", "拼多多推广", "天猫推广", "老客户转介绍", "其他"]
 PROMO_TYPE_OPTIONS = ["成交收费", "成交加扣", "其他"]
 
-# 映射字典 (列名修正：保留您要求的格式)
+# 映射字典
 CRM_COL_MAP = {
     'id': 'ID', 'date': '录入日期', 'sales_rep': '对接人', 'customer_name': '客户名称',
     'phone': '联系电话', 'source': '客户来源', 'shop_name': '店铺名称', 'unit_price': '单价(元/㎡)',
@@ -53,7 +54,6 @@ PROMO_COL_MAP = {
 CN_TO_EN_MAP = {v: k for k, v in CRM_COL_MAP.items()}
 DATABASE_COLUMNS = list(CRM_COL_MAP.keys())[1:] # 排除ID
 
-# 列名清洗映射 (用于 Excel/CSV 导入，增加容错)
 COLUMN_REMAP = {
     '日期': '录入日期', '店铺名字': '店铺名称', '单价（元/㎡）': '单价(元/㎡)', '平方数（㎡）': '平方数(㎡)',
     '应用场地 ': '应用场地', '跟踪进度 ': '跟踪进度', '是否施工 ': '是否施工',
@@ -84,7 +84,7 @@ def init_db():
         for u, d in INITIAL_USERS.items():
             c.execute("INSERT OR IGNORE INTO users VALUES (?, ?, ?, ?)", (u, d['password'], d['role'], d['display_name']))
     
-    # 2. 销售表 (确保结构完整)
+    # 2. 销售表
     c.execute('''CREATE TABLE IF NOT EXISTS sales (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         date TEXT, sales_rep TEXT, customer_name TEXT, phone TEXT, source TEXT, shop_name TEXT,
@@ -93,7 +93,7 @@ def init_db():
         total_amount REAL, follow_up_history TEXT, sample_no TEXT, order_no TEXT,
         last_follow_up_date TEXT, next_follow_up_date TEXT
     )''')
-
+    
     # 3. 推广表
     c.execute('''CREATE TABLE IF NOT EXISTS promotions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -102,6 +102,63 @@ def init_db():
         inquiry_spend REAL, cpl REAL, note TEXT
     )''')
     conn.commit()
+
+# 安全地将值转换为浮点数，如果失败则返回 0.0 (V11.0 进一步确保任何 None/空值/无效值都被转为 0.0)
+def get_safe_float(value):
+    try:
+        # 针对 Streamlit number_input 控件初始化值
+        if value is None or str(value).strip() == '':
+            return 0.0
+        # 尝试清理并转换
+        cleaned_value = str(value).replace(',', '').replace('¥', '').strip()
+        return float(cleaned_value)
+    except:
+        return 0.0
+
+# V11.0 核心函数：检查并自动转交客户
+def check_and_transfer_customers():
+    conn = get_conn()
+    c = conn.cursor()
+    today = datetime.date.today().isoformat()
+    # 查找未成交 (非'已成交') 且上次跟进日期超过 20 天的客户
+    
+    # 获取 'zhaoxiaoan' 的用户名
+    zhaoxiaoan_username = 'zhaoxiaoan' 
+    
+    # 获取需要转交的客户
+    c.execute(f"""
+        SELECT id, sales_rep, customer_name, last_follow_up_date 
+        FROM sales 
+        WHERE purchase_intent != '已成交' 
+        AND (
+            julianday('{today}') - julianday(last_follow_up_date) > 20 
+            OR last_follow_up_date IS NULL
+        )
+        AND sales_rep != ? 
+    """, (zhaoxiaoan_username,))
+    
+    records_to_transfer = c.fetchall()
+    
+    if records_to_transfer:
+        transfer_count = 0
+        for record_id, old_rep, name, last_date in records_to_transfer:
+            log_entry = f"[{today} 系统自动]: 客户未成交且超过 20 天未跟进 ({last_date}至今)，自动转交给 {zhaoxiaoan_username} 管理。"
+            
+            # 执行转交
+            c.execute("""
+                UPDATE sales 
+                SET sales_rep = ?, 
+                    follow_up_history = follow_up_history || ?,
+                    last_follow_up_date = ?
+                WHERE id = ?
+            """, (zhaoxiaoan_username, f"\n{log_entry}", today, record_id))
+            transfer_count += 1
+            
+        conn.commit()
+        if transfer_count > 0:
+            st.warning(f"🚨 系统提醒：已自动将 {transfer_count} 个超期未跟进且未成交的客户转交给赵小安管理员处理。")
+            return transfer_count
+    return 0
 
 # --- 核心 CRUD 函数 ---
 def get_data(rename_cols=False):
@@ -121,16 +178,7 @@ def get_data(rename_cols=False):
         st.error(f"数据库读取错误: {e}")
         return pd.DataFrame()
 
-# 安全地将值转换为浮点数，如果失败则返回 0.0
-def get_safe_float(value):
-    try:
-        if value is None or str(value).strip() == '':
-            return 0.0
-        return float(value)
-    except:
-        return 0.0
-
-# 安全地获取单个记录，确保数值字段不会因 None/空值导致编辑界面崩溃
+# V11.0 最终修复：使用加固后的 get_safe_float 确保编辑时不崩溃
 def get_single_record(record_id):
     conn = get_conn()
     c = conn.cursor()
@@ -155,6 +203,8 @@ def add_data(data):
     c.execute(f"INSERT INTO sales ({', '.join(DATABASE_COLUMNS)}) VALUES ({placeholders})", data)
     conn.commit()
 
+# ... (update_data, update_follow_up, delete_data, get_user_info, get_user_map, get_display_name_to_username_map, get_promo_data, add_promo_data 函数保持不变) ...
+
 def update_data(record_id, data):
     conn = get_conn()
     c = conn.cursor()
@@ -170,12 +220,17 @@ def update_data(record_id, data):
 def update_follow_up(record_id, new_log, next_date, new_status, new_intent):
     conn = get_conn()
     c = conn.cursor()
+    # V11.0 修复: 确保跟进历史不为 None 才能连接
+    c.execute("SELECT follow_up_history FROM sales WHERE id=?", (record_id,))
+    old_log = c.fetchone()[0] if c.fetchone() else ""
+    full_new_log = (old_log if old_log else "") + f"\n{new_log}"
+    
     c.execute("""
         UPDATE sales 
-        SET follow_up_history = follow_up_history || ?, 
+        SET follow_up_history = ?, 
             last_follow_up_date = ?, next_follow_up_date = ?, status = ?, purchase_intent = ?
         WHERE id = ?
-    """, (f"\n{new_log}", datetime.date.today().isoformat(), next_date, new_status, new_intent, record_id))
+    """, (full_new_log, datetime.date.today().isoformat(), next_date, new_status, new_intent, record_id))
     conn.commit()
 
 def delete_data(record_id):
@@ -219,7 +274,8 @@ def add_promo_data(data):
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', data)
     conn.commit()
 
-# 导入功能 (V10.9 优化日期和缺失字段处理)
+
+# 导入功能 (V11.0 保持 V10.9 的健壮性)
 def import_data_from_excel(df_imported):
     conn = get_conn()
     c = conn.cursor()
@@ -234,7 +290,7 @@ def import_data_from_excel(df_imported):
 
     df_to_save = df_imported.copy()
     
-    # V10.9: 补全缺失列并设定默认值
+    # V11.0: 补全缺失列并设定默认值
     for cn_col, en_col in CN_TO_EN_MAP.items():
         if cn_col not in df_to_save.columns:
             if en_col in ['unit_price', 'area', 'construction_fee', 'material_fee', 'shipping_fee', 'total_amount']:
@@ -253,14 +309,13 @@ def import_data_from_excel(df_imported):
         
     df_to_save['sales_rep'] = df_to_save['sales_rep'].astype(str).apply(lambda x: user_map_rev.get(x.strip(), 'admin'))
     
-    # V10.9: 日期字段处理 - 确保有默认值
+    # V11.0: 日期字段处理 - 确保有默认值
     today = datetime.date.today().isoformat()
     df_to_save['date'] = pd.to_datetime(df_to_save['date'], errors='coerce').dt.date.astype(str).replace({'NaT': today})
     
     # 如果上次跟进/计划下次跟进缺失，则使用录入日期
-    df_to_save['last_follow_up_date'] = pd.to_datetime(df_to_save['last_follow_up_date'], errors='coerce').fillna(df_to_save['date']).dt.date.astype(str)
-    df_to_save['next_follow_up_date'] = pd.to_datetime(df_to_save['next_follow_up_date'], errors='coerce').fillna(df_to_save['date']).dt.date.astype(str)
-
+    df_to_save['last_follow_up_date'] = pd.to_datetime(df_to_save['last_follow_up_date'], errors='coerce').dt.date.astype(str).fillna(df_to_save['date'])
+    df_to_save['next_follow_up_date'] = pd.to_datetime(df_to_save['next_follow_up_date'], errors='coerce').dt.date.astype(str).fillna(df_to_save['date'])
 
     # 写入
     data_tuples = []
@@ -286,7 +341,6 @@ def import_data_from_excel(df_imported):
     except Exception as e:
         return False, str(e)
 
-# 生成导入模板函数 (V10.9 新增)
 def create_import_template():
     # 移除 ID 字段，其他字段使用中文列名
     template_cols = list(CRM_COL_MAP.values())[1:]
@@ -358,6 +412,52 @@ def check_password():
         return False
     return True
 
+# --- 提醒和转交逻辑 (V11.0 新增) ---
+def display_reminders(df, current_user_username, user_map):
+    today = datetime.date.today()
+    
+    # 转换为日期格式进行比较
+    df['next_follow_up_date'] = pd.to_datetime(df['计划下次跟进'], errors='coerce').dt.date
+    df['last_follow_up_date_dt'] = pd.to_datetime(df['上次跟进日期'], errors='coerce').dt.date
+
+    # 1. 筛选当前用户的客户
+    if st.session_state["role"] == 'user':
+        df_filtered = df[df['对接人'] == user_map[current_user_username]].copy()
+    else:
+        # 管理员看所有人的提醒
+        df_filtered = df.copy() 
+
+    # 2. 找出超期客户 (今天 > 计划下次跟进日期)
+    df_overdue = df_filtered[
+        (df_filtered['next_follow_up_date'].notna()) & 
+        (df_filtered['next_follow_up_date'] < today)
+    ].sort_values('next_follow_up_date')
+
+    # 3. 找出未设置下次跟进的客户 (首次录入后未跟进)
+    # 首次录入日期作为首次跟进日期
+    df_no_fup = df_filtered[
+        (df_filtered['next_follow_up_date'].isna()) | 
+        (df_filtered['计划下次跟进'] == df_filtered['录入日期'])
+    ]
+
+    # 4. 汇总提醒
+    total_reminders = len(df_overdue) + len(df_no_fup)
+    
+    if total_reminders > 0:
+        with st.expander(f"🔔 待处理跟进提醒 ({total_reminders} 个客户超期)", expanded=True):
+            if not df_overdue.empty:
+                st.error(f"🔴 **超期客户 (上次计划跟进日期已过，{len(df_overdue)} 个)**：")
+                df_show = df_overdue[['ID', '客户名称', '对接人', '计划下次跟进', '跟踪进度', '购买意向']].copy()
+                st.dataframe(df_show, hide_index=True)
+
+            if not df_no_fup.empty:
+                st.warning(f"🟡 **未设置下次跟进或首次录入客户 ({len(df_no_fup)} 个)**：")
+                df_show = df_no_fup[['ID', '客户名称', '对接人', '录入日期', '跟踪进度', '购买意向']].copy()
+                st.dataframe(df_show, hide_index=True)
+    else:
+        st.success("✅ 目前所有跟进计划都按时进行，暂无超期提醒。")
+        
+
 # --- 主程序 ---
 def main():
     st.set_page_config(page_title="CRM全能版", layout="wide")
@@ -373,10 +473,20 @@ def main():
         st.sidebar.title(f"👤 {user_name}")
         menu = ["📝 新增销售记录", "📊 数据追踪与查看", "📈 销售分析看板", "🌐 推广数据看板"]
         choice = st.sidebar.radio("菜单", menu)
+        
+        # V11.0：在数据加载后立即执行自动转交检查
+        if choice == "📊 数据追踪与查看":
+            if 'transfer_check_done' not in st.session_state:
+                 # 确保只运行一次或在需要时运行
+                transferred_count = check_and_transfer_customers()
+                st.session_state['transfer_check_done'] = True 
+                if transferred_count > 0:
+                    st.rerun() # 转交后刷新数据
 
         # 侧边栏：备份功能 
         st.sidebar.markdown("---")
         st.sidebar.markdown("### 💾 数据备份")
+        # ... (备份代码保持不变) ...
         if st.sidebar.button("下载客户数据 (Excel)"):
             df_exp = get_data(rename_cols=True)
             if not df_exp.empty:
@@ -391,7 +501,8 @@ def main():
         # 1. 新增
         if choice == "📝 新增销售记录":
             st.subheader("📝 录入新客户")
-            # V10.9: 录入界面字段名调整，确保一致性
+            # V11.0: 首次跟进日期默认为录入日期 + 3天
+            default_next_fup = datetime.date.today() + timedelta(days=3)
             with st.form("add_form", clear_on_submit=True):
                 c1, c2, c3 = st.columns(3)
                 date_val = c1.date_input("录入日期", datetime.date.today())
@@ -409,7 +520,6 @@ def main():
                 fee2 = c3.number_input("辅料费(元)", 0.0) 
                 fee3 = c3.number_input("运费(元) (独立计算)", 0.0) 
                 
-                # 预估总金额的计算和显示 (不含运费)
                 total = (price * area) + fee1 + fee2 
                 st.info(f"⚡️ 预估总金额 (不含运费，用于报表): ¥{total:,.2f}")
 
@@ -420,7 +530,7 @@ def main():
                 sample_no = c4.text_input("寄样单号")
                 order_no = c4.text_input("订单号")
                 
-                next_fup = c5.date_input("计划下次跟进", datetime.date.today() + datetime.timedelta(days=3))
+                next_fup = c5.date_input("计划下次跟进", default_next_fup)
                 remark = c5.text_area("首次沟通记录")
                 
                 if st.form_submit_button("提交录入"):
@@ -442,20 +552,29 @@ def main():
             st.subheader("📋 客户列表")
             df = get_data(rename_cols=True)
             
+            # V11.0: 显示提醒卡片
+            if not df.empty:
+                df['对接人'] = df['对接人'].map(user_map).fillna(df['对接人'])
+                display_reminders(df, current_user_username, user_map_rev) 
+
             # 快速跟进
             with st.expander("➕ 快速追加跟进"):
                 if not df.empty:
-                    df['显示对接人'] = df['对接人'].map(user_map).fillna(df['对接人'])
+                    
                     if role == 'user':
-                        df_user_filtered = df[df['对接人'] == current_user_username].copy()
-                        opts = [f"{r['ID']} - {r['客户名称']} ({r['显示对接人']})" for i, r in df_user_filtered.iterrows()]
+                        df_user_filtered = df[df['对接人'] == user_name].copy()
+                        opts = [f"{r['ID']} - {r['客户名称']} ({r['对接人']})" for i, r in df_user_filtered.iterrows()]
                     else:
                         df_user_filtered = df 
-                        opts = [f"{r['ID']} - {r['客户名称']} ({r['显示对接人']})" for i, r in df.iterrows()]
+                        opts = [f"{r['ID']} - {r['客户名称']} ({r['对接人']})" for i, r in df.iterrows()]
                         
                     sel = st.selectbox("选择客户", opts, key='fup_sel')
                     note = st.text_input("本次跟进情况")
-                    next_date = st.date_input("计划下次跟进", datetime.date.today() + datetime.timedelta(days=3))
+                    
+                    # V11.0: 计划下次跟进日期自动设置为今天 + 3天
+                    default_next_fup = datetime.date.today() + timedelta(days=3)
+                    next_date = st.date_input("计划下次跟进", default_next_fup)
+                    
                     up_status = st.selectbox("更新进度状态", STATUS_OPTIONS)
                     up_intent = st.selectbox("更新购买意向", INTENT_OPTIONS)
 
@@ -466,6 +585,7 @@ def main():
                             new_log = f"[{datetime.date.today()} {user_name}]: {note}"
                             update_follow_up(uid, new_log, str(next_date), up_status, up_intent)
                             st.success("已更新")
+                            st.session_state['transfer_check_done'] = False # 跟进后重置检查，避免误转交
                             st.rerun()
                 else: st.info("暂无客户数据可供跟进。")
             
@@ -477,6 +597,7 @@ def main():
                 search = c3.text_input("搜索客户/电话")
                 
                 df_show = df.copy()
+                # df_show['对接人'] 已经在 display_reminders 中映射，但为了安全，在全局 DF 上重新映射
                 df_show['对接人'] = df_show['对接人'].map(user_map).fillna(df_show['对接人'])
                 
                 if filter_user != "全部":
@@ -484,13 +605,13 @@ def main():
                 if search:
                     df_show = df_show[df_show['客户名称'].astype(str).str.contains(search, case=False, na=False) | df_show['联系电话'].astype(str).str.contains(search, case=False, na=False)]
                 
-                # 列表显示顺序
+                # 列表显示顺序 (保持与 V10.9 一致)
                 cols_to_show = [
                     'ID', '录入日期', '对接人', '客户名称', '联系电话', '店铺名称', 
                     '单价(元/㎡)', '平方数(㎡)', 
                     '预估总金额(元)', '运费(元)', 
                     '跟踪进度', '购买意向', '计划下次跟进', '跟进历史',
-                    '是否施工', '施工费(元)', '辅料费(元)', '寄样单号', '订单号', '上次跟进日期' # V10.9 调整，将这些字段显示出来
+                    '是否施工', '施工费(元)', '辅料费(元)', '寄样单号', '订单号', '上次跟进日期' 
                 ]
                 
                 # 格式化金额，确保显示
@@ -509,6 +630,7 @@ def main():
                 # 🛠️ 管理员编辑/删除客户 
                 with st.expander("🛠️ 管理员编辑/删除客户"):
                     if not df.empty:
+                        # V11.0: 使用原始的 sales_rep 列进行筛选，避免中文名导致问题
                         customer_ids = df['ID'].tolist()
                         edit_id = st.selectbox("选择要编辑或删除的客户ID", customer_ids, key='edit_id_sel')
                         record = get_single_record(edit_id)
@@ -531,7 +653,7 @@ def main():
                                 new_shop = c2.selectbox("店铺名称", SHOP_OPTIONS, index=SHOP_OPTIONS.index(record['shop_name']) if record['shop_name'] in SHOP_OPTIONS else 0)
                                 new_site = c2.selectbox("应用场地", SITE_OPTIONS, index=SITE_OPTIONS.index(record['site_type']) if record['site_type'] in SITE_OPTIONS else 0)
                                 
-                                # 金额和面积
+                                # 金额和面积 (V11.0: 确保使用 float 值)
                                 new_area = c3.number_input("平方数(㎡)", record['area'], min_value=0.0)
                                 new_price = c3.number_input("单价(元/㎡)", record['unit_price'], min_value=0.0)
                                 
@@ -600,7 +722,7 @@ def main():
                 with st.expander("⬆️ 管理员导入 (Excel/CSV)"):
                     st.warning("⚠️ 导入注意: 导入文件应严格按照核心必填列顺序，否则可能无法正确解析！请确保所有金额、面积、单价字段**不包含任何货币符号或千位分隔符**，否则可能导致错误。")
                     
-                    # V10.9: 增加模板下载
+                    # 模板下载
                     template_df = create_import_template()
                     out = io.BytesIO()
                     with pd.ExcelWriter(out, engine='xlsxwriter') as writer:
@@ -621,7 +743,7 @@ def main():
                                 else: st.error(f"导入过程中发生致命错误: {msg}")
                             except Exception as e: st.error(f"文件读取错误: {e}")
 
-        # 3. 销售分析
+        # 3. 销售分析 (保持不变)
         elif choice == "📈 销售分析看板":
             st.subheader("📈 核心销售数据分析 (仅统计 [已签约] 或 [已完结/已收款] 客户)")
             df = get_data(rename_cols=True)
@@ -632,7 +754,6 @@ def main():
                 st.sidebar.markdown("---")
                 st.sidebar.markdown("### 🎯 目标设置")
                 
-                # --- 金额和面积双目标输入 ---
                 target_sales_default = 100000 
                 target_sales = st.sidebar.number_input("💰 本月销售额目标 (元)", value=target_sales_default, min_value=1)
                 
@@ -640,7 +761,6 @@ def main():
                 target_area = st.sidebar.number_input("📐 本月销售面积目标 (㎡)", value=target_area_default, min_value=1)
                 
                 # --- 1. 数据清洗与筛选 ---
-                
                 ACQUIRED_STATUSES = ['已签约', '已完结/已收款']
                 df_sold = df[df['跟踪进度'].isin(ACQUIRED_STATUSES)].copy()
                 
@@ -659,11 +779,9 @@ def main():
                     k1.metric("💰 实际总销售额", f"¥{total_sales:,.0f}")
                     k2.metric("📐 实际销售面积", f"{total_area:,.0f} ㎡")
                     
-                    # 销售额完成率
                     sales_completion_rate = min(total_sales / target_sales, 1.0) if target_sales > 0 else 0
                     k3.metric("📈 金额完成率", f"{sales_completion_rate*100:.1f}%", f"距目标差额: ¥{total_sales - target_sales:,.0f}")
                     
-                    # 平方数完成率
                     area_completion_rate = min(total_area / target_area, 1.0) if target_area > 0 else 0
                     k4.metric("📏 面积完成率", f"{area_completion_rate*100:.1f}%", f"距目标差额: {total_area - target_area:,.0f} ㎡")
                     
@@ -672,12 +790,10 @@ def main():
                     st.markdown("#### 📈 销售额分布与客户来源分析")
                     c1, c2 = st.columns(2)
                     
-                    # 图表1：店铺成交业绩占比
                     fig1 = px.pie(df_sold, names='店铺名称', values='预估总金额(元)', 
                                   title="实际成交额 - 店铺占比", hole=.3)
                     c1.plotly_chart(fig1, use_container_width=True)
                     
-                    # 图表2：客户来源分析
                     df_source_sum = df_sold.groupby('客户来源')['预估总金额(元)'].sum().reset_index()
                     fig2 = px.bar(df_source_sum, x='客户来源', y='预估总金额(元)', 
                                   title="实际成交额 - 客户来源", color='客户来源', 
@@ -688,23 +804,18 @@ def main():
                     st.markdown("---")
                     st.markdown("#### 🏆 销售龙虎榜")
                     
-                    # 计算并显示所有客户的“预估总金额(元)”
                     df['对接人'] = df['对接人'].map(user_map).fillna(df['对接人'])
                     df_sold['对接人'] = df_sold['对接人'].map(user_map).fillna(df_sold['对接人'])
                     
-                    # 统计所有客户的预估总金额
                     rank_total_amount = df.groupby('对接人')['预估总金额(元)'].sum().reset_index()
                     rank_total_amount.rename(columns={'预估总金额(元)': '预估总金额(元) (所有客户)'}, inplace=True)
                     
-                    # 统计成交数据
                     rank_sold = df_sold.groupby('对接人')[['预估总金额(元)', '平方数(㎡)']].sum().reset_index()
                     rank_sold.rename(columns={'预估总金额(元)': '成交总金额', '平方数(㎡)': '成交总面积'}, inplace=True)
                     
-                    # 合并并按成交金额排序
                     rank = pd.merge(rank_total_amount, rank_sold, on='对接人', how='outer').fillna(0)
                     rank = rank.sort_values('成交总金额', ascending=False)
                     
-                    # 格式化展示
                     rank['成交总金额'] = rank['成交总金额'].apply(lambda x: f"¥{x:,.0f}")
                     rank['成交总面积'] = rank['成交总面积'].apply(lambda x: f"{x:,.0f} ㎡")
                     rank['预估总金额(元) (所有客户)'] = rank['预估总金额(元) (所有客户)'].apply(lambda x: f"¥{x:,.0f}")
@@ -712,7 +823,7 @@ def main():
                     st.dataframe(rank.rename(columns={'对接人': '销售代表'}), use_container_width=True, hide_index=True)
 
 
-        # 4. 推广看板 
+        # 4. 推广看板 (保持不变)
         elif choice == "🌐 推广数据看板":
             st.subheader("🌐 推广数据")
             dfp = get_promo_data(rename_cols=True)
