@@ -61,16 +61,42 @@ PROMO_COL_MAP = {
 # 中文到英文列名映射（用于导入时转换）
 CN_TO_EN_MAP = {v: k for k, v in CRM_COL_MAP.items()}
 # 导入时必须包含的列（不含 ID，不含自动计算项）
+# **注意：我们增加了 '联系电话' 和 '客户来源' 的容错性，如果不提供，系统会填空。但为了数据完整性，仍推荐包含。
 REQUIRED_IMPORT_COLUMNS = [
-    '录入日期', '对接人', '客户名称', '联系电话', '客户来源', '店铺名称', '单价(元/㎡)', '平方数(㎡)', 
+    '录入日期', '对接人', '客户名称', '店铺名称', '单价(元/㎡)', '平方数(㎡)', 
     '应用场地', '跟踪进度', '是否施工', '施工费(元)', '辅料费(元)', '运费(元)', '购买意向', 
     '跟进历史', '寄样单号', '订单号', '上次跟进日期', '计划下次跟进'
+]
+# 需要做额外映射的列（原始文件可能存在的列名和系统标准列名的映射）
+COLUMN_REMAP = {
+    '日期': '录入日期',
+    '店铺名字': '店铺名称',
+    '单价（元/㎡）': '单价(元/㎡)',
+    '平方数（㎡）': '平方数(㎡)',
+    '应用场地 ': '应用场地', # 注意：应用场地后面可能有一个空格
+    '跟踪进度 ': '跟踪进度',
+    '是否施工 ': '是否施工',
+    '施工费（元）': '施工费(元)',
+    '辅料费用（元）': '辅料费(元)',
+    '购买意向 ': '购买意向',
+    '总金额（元）': '预估总金额(元)',
+    '备注': '跟进历史', # 客户的“备注”通常是我们的“跟进历史”的起点
+    '手机': '联系电话',
+    '电话': '联系电话',
+    '客户来源': '客户来源',
+    '运费（元）': '运费(元)'
+}
+# 导入时数据库需要的所有英文列（用于执行 INSERT INTO）
+DATABASE_COLUMNS = [
+    'date', 'sales_rep', 'customer_name', 'phone', 'source', 'shop_name', 'unit_price', 'area', 
+    'site_type', 'status', 'is_construction', 'construction_fee', 'material_fee', 'shipping_fee',
+    'purchase_intent', 'total_amount', 'follow_up_history', 'sample_no', 'order_no',
+    'last_follow_up_date', 'next_follow_up_date' 
 ]
 
 # --- 数据库连接函数（全部使用内存模式）---
 
 def get_user_conn():
-    # 🚨 关键修复：确保在任何时候都创建表和插入初始用户
     conn = sqlite3.connect(USER_DB_FILE)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS users (
@@ -80,17 +106,15 @@ def get_user_conn():
         display_name TEXT
     )''')
     
-    # 始终尝试插入初始用户，使用 OR IGNORE 确保不会因为重复键而报错
     for username, data in INITIAL_USERS.items():
         c.execute("INSERT OR IGNORE INTO users VALUES (?, ?, ?, ?)", 
                   (username, data['password'], data['role'], data['display_name']))
     
     conn.commit()
-    return conn # 返回连接对象
+    return conn 
 
 
 def get_crm_conn():
-    # 🚨 保持不变：确保 CRM 客户表创建
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS sales (
@@ -121,7 +145,6 @@ def get_crm_conn():
     return conn
 
 def get_promo_conn():
-    # 🚨 保持不变：确保推广数据表创建
     conn = sqlite3.connect(PROMO_DB_FILE)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS promotions (
@@ -144,7 +167,7 @@ def get_promo_conn():
 
 
 # --- 数据库函数 (初始化，现为空) ---
-# 🚨 保持不变：这些函数现在只是为了兼容 main() 中的调用而保留
+
 def init_db():
     pass
 
@@ -161,7 +184,6 @@ def get_all_users():
     return df
 
 def get_user_info(username):
-    # 🚨 此函数依赖于 get_user_conn() 成功创建 users 表
     conn = get_user_conn()
     c = conn.cursor()
     c.execute("SELECT password, role, display_name FROM users WHERE username=?", (username,))
@@ -192,7 +214,6 @@ def get_display_name_to_username_map():
     return df.set_index('display_name')['username'].to_dict()
 
 # --- 数据库函数 (CRM 客户数据) ---
-# init_db() 已移到 get_crm_conn() 中
 
 def get_data(rename_cols=False):
     conn = get_crm_conn()
@@ -222,55 +243,74 @@ def import_data_from_excel(df_imported):
     c = conn.cursor()
     display_to_user_map = get_display_name_to_username_map()
     
-    # 1. 检查并重命名列
-    df_imported.columns = [col.strip() for col in df_imported.columns] # 去除空格
+    # 1. 检查并清洗列名
+    df_imported.columns = [col.strip() for col in df_imported.columns] # 去除列名两边的空格
+    # 应用列名映射（例如：把 '日期' 映射为 '录入日期'）
+    df_imported.rename(columns=COLUMN_REMAP, inplace=True)
     
+    # 检查必填列
     missing_cols = [col for col in REQUIRED_IMPORT_COLUMNS if col not in df_imported.columns]
-    if missing_cols:
-        return False, f"缺少以下必填列，请检查表格抬头：{', '.join(missing_cols)}"
+    # 允许 '联系电话' 和 '客户来源' 缺失，但如果是必填，则在此处检查
+    
+    if '客户名称' not in df_imported.columns:
+        return False, "缺少核心必填列：'客户名称'"
+    
+    # 2. 数据清洗和预处理
+    df_to_save = df_imported.copy()
 
-    # 仅选择需要导入的列，并将其转换为数据库的英文列名
-    df_to_save = df_imported[REQUIRED_IMPORT_COLUMNS].copy()
+    # 确保所有需要的列（即使缺失）都存在，缺失的用空字符串或 0 填充
+    for cn_col in CN_TO_EN_MAP:
+        if cn_col not in df_to_save.columns:
+            # 根据数据类型预设空值，数值设为 0，文本设为 ''
+            if CN_TO_EN_MAP[cn_col] in ['unit_price', 'area', 'construction_fee', 'material_fee', 'shipping_fee']:
+                 df_to_save[cn_col] = 0.0
+            elif CN_TO_EN_MAP[cn_col] not in ['id', 'total_amount']:
+                 df_to_save[cn_col] = ''
+            
+    # 将中文列名转换为数据库的英文列名
     df_to_save.rename(columns=CN_TO_EN_MAP, inplace=True)
     
-    # 2. 数据清洗和计算
+    # 3. 数据类型和格式转换
+    
+    # 日期处理 (日期解析失败的将变为 NaT，稍后在 to_sql 时会变成 None 或空字符串)
     df_to_save['date'] = pd.to_datetime(df_to_save['date'], errors='coerce').dt.strftime('%Y-%m-%d')
     df_to_save['last_follow_up_date'] = pd.to_datetime(df_to_save['last_follow_up_date'], errors='coerce').dt.strftime('%Y-%m-%d')
     df_to_save['next_follow_up_date'] = pd.to_datetime(df_to_save['next_follow_up_date'], errors='coerce').dt.strftime('%Y-%m-%d')
 
-    # 确保数值列是数字，空值填 0
+    # 数值列处理：转换为数字，转换失败（如 '50平'）的将变成 NaN，再填充 0.0
     num_cols = ['unit_price', 'area', 'construction_fee', 'material_fee', 'shipping_fee']
     for col in num_cols:
+        # 尝试去除数值中的非数字字符 (例如去除 '平')
+        df_to_save[col] = df_to_save[col].astype(str).str.replace(r'[^\d\.]', '', regex=True)
         df_to_save[col] = pd.to_numeric(df_to_save[col], errors='coerce').fillna(0.0)
 
-    # 计算 total_amount (预估总金额，不含运费)
+    # 4. 计算 total_amount (预估总金额，不含运费)
     df_to_save['total_amount'] = (df_to_save['unit_price'] * df_to_save['area']) + df_to_save['construction_fee'] + df_to_save['material_fee']
     
-    # 3. 对接人映射：将中文名转换为 username
-    df_to_save['sales_rep'] = df_to_save['sales_rep'].apply(lambda x: display_to_user_map.get(x, 'admin'))
-
-    # 4. 插入数据库
-    columns = [
-        'date', 'sales_rep', 'customer_name', 'phone', 'source', 'shop_name', 'unit_price', 'area', 
-        'site_type', 'status', 'is_construction', 'construction_fee', 'material_fee', 'shipping_fee',
-        'purchase_intent', 'total_amount', 'follow_up_history', 'sample_no', 'order_no',
-        'last_follow_up_date', 'next_follow_up_date' 
-    ]
+    # 5. 对接人映射：将中文名转换为 username
+    # 缺失或匹配不上的对接人默认分配给 'admin'
+    df_to_save['sales_rep'] = df_to_save['sales_rep'].astype(str).str.strip().apply(lambda x: display_to_user_map.get(x, 'admin'))
     
+    # 6. 插入数据库
     data_tuples = []
+    
     for index, row in df_to_save.iterrows():
-        # 严格按照数据库列顺序构建元组
-        data_tuples.append((
-            row['date'], row['sales_rep'], row['customer_name'], row['phone'], row['source'], row['shop_name'],
-            row['unit_price'], row['area'], row['site_type'], row['status'], row['is_construction'],
-            row['construction_fee'], row['material_fee'], row['shipping_fee'], row['purchase_intent'],
-            row['total_amount'], row['follow_up_history'], row['sample_no'], row['order_no'],
-            row['last_follow_up_date'], row['next_follow_up_date']
-        ))
+        # 严格按照 DATABASE_COLUMNS 顺序构建元组
+        row_tuple = (
+            row.get('date', None), row.get('sales_rep', 'admin'), row.get('customer_name', ''), row.get('phone', ''), row.get('source', ''), 
+            row.get('shop_name', ''), row.get('unit_price', 0.0), row.get('area', 0.0), row.get('site_type', ''), 
+            row.get('status', '初次接触'), row.get('is_construction', '否'), row.get('construction_fee', 0.0), 
+            row.get('material_fee', 0.0), row.get('shipping_fee', 0.0), row.get('purchase_intent', '低'), 
+            row.get('total_amount', 0.0), row.get('follow_up_history', ''), row.get('sample_no', ''), 
+            row.get('order_no', ''), row.get('last_follow_up_date', None), row.get('next_follow_up_date', None)
+        )
+        data_tuples.append(row_tuple)
 
     try:
-        c.executemany(f'''INSERT INTO sales ({', '.join(columns)}) 
-                          VALUES ({', '.join(['?']*len(columns))})''', data_tuples)
+        # 确保插入语句使用的列和元组顺序一致
+        placeholders = ', '.join(['?'] * len(DATABASE_COLUMNS))
+        c.executemany(f'''INSERT INTO sales ({', '.join(DATABASE_COLUMNS)}) 
+                          VALUES ({placeholders})''', data_tuples)
         conn.commit()
         conn.close()
         return True, len(df_imported)
@@ -721,16 +761,25 @@ def main():
                  
                  # 导入功能集成在这里
                  with st.expander("📥 批量导入客户数据 (Excel/CSV)"):
-                     st.warning("导入前请注意：导入文件需**完全匹配**以下所有列名，否则导入会失败！")
-                     st.markdown(f"**必填列名:** `{', '.join(REQUIRED_IMPORT_COLUMNS)}`")
+                     st.warning("导入前请注意：导入文件需**尽量匹配**系统预设列名，否则数据可能无法正确解析！")
+                     st.markdown(f"**核心必填列名:** `客户名称`。**推荐列名:** `{', '.join(REQUIRED_IMPORT_COLUMNS)}`")
                      
-                     uploaded_file = st.file_uploader("选择您的 Excel/CSV 文件", type=['xlsx', 'csv'])
+                     # 使用 Streamlit session state 存储 uploaded_file，避免文件重复读取问题
+                     if 'uploaded_file' not in st.session_state:
+                         st.session_state['uploaded_file'] = None
+                         
+                     # 重新定义 file_uploader 
+                     uploaded_file = st.file_uploader("选择您的 Excel/CSV 文件", type=['xlsx', 'csv'], key="file_upload_widget")
                      
-                     if uploaded_file is not None:
+                     if uploaded_file is not None and st.session_state['uploaded_file'] != uploaded_file:
+                         # 每次新文件上传或重新加载时，更新 session state
+                         st.session_state['uploaded_file'] = uploaded_file
+                         
                          try:
-                             # 自动识别文件类型
+                             # 尝试读取文件
                              if uploaded_file.name.endswith(('.csv', '.txt')):
-                                 # 尝试使用GBK/utf-8解码，增强兼容性
+                                 # 增强 CSV 兼容性：尝试用 utf-8 解码，失败则尝试 gbk
+                                 uploaded_file.seek(0) # 确保文件指针在开头
                                  try:
                                      df_import = pd.read_csv(uploaded_file, encoding='utf-8')
                                  except UnicodeDecodeError:
@@ -740,20 +789,36 @@ def main():
                              else: # 默认为 Excel
                                  df_import = pd.read_excel(uploaded_file)
                              
+                             # 将读取成功的 DataFrame 存入 session state
+                             st.session_state['df_import_preview'] = df_import
                              st.success("文件读取成功！请预览数据并确认导入。")
                              st.dataframe(df_import.head())
                              
-                             if st.button("🚀 确认导入并写入数据库"):
-                                 success, result = import_data_from_excel(df_import)
-                                 if success:
-                                     st.success(f"🎉 导入成功！共导入 {result} 条记录。")
-                                     st.balloons()
-                                     st.rerun()
-                                 else:
-                                     st.error(f"导入失败！请检查文件格式和列名。错误信息: {result}")
-                                     
                          except Exception as e:
-                             st.error(f"读取文件失败，请确保格式正确且编码为 UTF-8 (如果是 CSV)。错误: {e}")
+                             st.error(f"读取文件失败，请确保格式正确且编码为 UTF-8 或 GBK (如果是 CSV)。错误: {e}")
+                             st.session_state['df_import_preview'] = None
+                             st.session_state['uploaded_file'] = None # 清空状态以允许重新上传
+                             
+                     # 只有当 preview 存在时，才显示确认按钮
+                     if 'df_import_preview' in st.session_state and st.session_state['df_import_preview'] is not None:
+                         # **将导入按钮放在这里，确保点击时 df_import_preview 是可用的**
+                         if st.button("🚀 确认导入并写入数据库"):
+                             df_to_process = st.session_state['df_import_preview']
+                             success, result = import_data_from_excel(df_to_process)
+                             
+                             if success:
+                                 st.success(f"🎉 导入成功！共导入 {result} 条记录。")
+                                 st.balloons()
+                                 # 清除状态并刷新页面
+                                 del st.session_state['df_import_preview']
+                                 del st.session_state['uploaded_file']
+                                 st.rerun()
+                             else:
+                                 st.error(f"导入失败！请检查文件格式和列名。错误信息: {result}")
+                                 
+                     elif st.session_state['uploaded_file'] is not None:
+                        # 如果文件已上传，但预览失败，提示用户检查
+                        st.warning("文件已选择，但读取失败。请检查文件内容是否正确。")
 
 
                  col_user, col_del, col_edit = st.columns(3)
