@@ -52,7 +52,6 @@ PROMO_COL_MAP = {
 }
 
 CN_TO_EN_MAP = {v: k for k, v in CRM_COL_MAP.items()}
-REQUIRED_IMPORT_COLUMNS = list(CRM_COL_MAP.values())[1:] # 排除ID
 DATABASE_COLUMNS = list(CRM_COL_MAP.keys())[1:] # 排除ID
 
 # 列名清洗映射
@@ -67,7 +66,6 @@ COLUMN_REMAP = {
 
 # --- 数据库连接函数 ---
 def get_conn():
-    # check_same_thread=False 允许在 Streamlit 的多线程环境中使用
     return sqlite3.connect(DB_FILE, check_same_thread=False)
 
 def init_db():
@@ -83,13 +81,7 @@ def init_db():
         for u, d in INITIAL_USERS.items():
             c.execute("INSERT OR IGNORE INTO users VALUES (?, ?, ?, ?)", (u, d['password'], d['role'], d['display_name']))
     
-    # 2. 销售表 (包含 shipping_fee)
-    # 检查列是否存在，不存在则尝试添加(简单迁移逻辑)
-    try:
-        c.execute("SELECT shipping_fee FROM sales LIMIT 1")
-    except:
-        c.execute("DROP TABLE IF EXISTS sales") # 简单粗暴：结构不对就重建，确保运行
-
+    # 2. 销售表 (确保结构完整)
     c.execute('''CREATE TABLE IF NOT EXISTS sales (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         date TEXT, sales_rep TEXT, customer_name TEXT, phone TEXT, source TEXT, shop_name TEXT,
@@ -160,22 +152,6 @@ def get_display_name_to_username_map():
     conn.close()
     return df.set_index('display_name')['username'].to_dict()
 
-def add_new_user(username, password, role, display_name):
-    conn = get_conn()
-    try:
-        conn.execute("INSERT INTO users VALUES (?, ?, ?, ?)", (username, password, role, display_name))
-        conn.commit()
-        return True
-    except: return False
-    finally: conn.close()
-
-def delete_data(record_id):
-    conn = get_conn()
-    conn.execute("DELETE FROM sales WHERE id=?", (record_id,))
-    conn.commit()
-    conn.close()
-
-# 推广数据函数
 def get_promo_data(rename_cols=False):
     conn = get_conn()
     df = pd.read_sql_query("SELECT * FROM promotions", conn)
@@ -210,9 +186,11 @@ def import_data_from_excel(df_imported):
 
     df_to_save = df_imported.copy()
     # 补全缺失列
-    for col in CN_TO_EN_MAP:
-        if col not in df_to_save.columns:
-            df_to_save[col] = 0.0 if '费' in col or '价' in col or '平' in col or '额' in col else ''
+    for cn_col in CN_TO_EN_MAP:
+        if cn_col not in df_to_save.columns:
+             # 根据列名类型给默认值
+            is_num_col = any(keyword in cn_col for keyword in ['费', '价', '平', '额'])
+            df_to_save[cn_col] = 0.0 if is_num_col else ''
             
     df_to_save.rename(columns=CN_TO_EN_MAP, inplace=True)
     
@@ -270,6 +248,7 @@ def main():
     if check_password():
         user_name = st.session_state["display_name"]
         role = st.session_state["role"]
+        current_user_username = st.session_state["user_now"]
         user_map = get_user_map()
         
         st.sidebar.title(f"👤 {user_name}")
@@ -305,26 +284,31 @@ def main():
                 price = c2.number_input("单价", 0.0)
                 area = c2.number_input("面积", 0.0)
                 
-                is_const = c3.selectbox("施工", ["否", "是"])
+                is_const = c3.selectbox("是否施工", ["否", "是"])
                 fee1 = c3.number_input("施工费", 0.0)
                 fee2 = c3.number_input("辅料费", 0.0)
                 fee3 = c3.number_input("运费", 0.0)
                 
                 st.markdown("---")
                 c4, c5 = st.columns(2)
-                intent = c4.selectbox("意向", INTENT_OPTIONS)
-                status = c4.selectbox("进度", STATUS_OPTIONS)
-                remark = c5.text_area("备注")
+                intent = c4.selectbox("购买意向", INTENT_OPTIONS)
+                status = c4.selectbox("跟踪进度", STATUS_OPTIONS)
+                sample_no = c4.text_input("寄样单号")
+                order_no = c4.text_input("订单号")
+                
+                next_fup = c5.date_input("计划下次跟进", datetime.date.today() + datetime.timedelta(days=3))
+                remark = c5.text_area("首次沟通记录")
                 
                 if st.form_submit_button("提交录入"):
                     if not name:
                         st.error("请输入客户名称")
                     else:
                         total = (price * area) + fee1 + fee2
+                        log_entry = f"[{datetime.date.today()} {user_name}]: 首次录入。{remark}"
                         data = (
-                            str(date_val), st.session_state['user_now'], name, phone, source, shop,
+                            str(date_val), current_user_username, name, phone, source, shop,
                             price, area, site, status, is_const, fee1, fee2, fee3, intent, total,
-                            f"[{datetime.date.today()}] {remark}", "", "", str(date_val), ""
+                            log_entry, sample_no, order_no, str(date_val), str(next_fup)
                         )
                         add_data(data)
                         st.success("录入成功！")
@@ -339,13 +323,21 @@ def main():
                 if not df.empty:
                     df['显示对接人'] = df['对接人'].map(user_map).fillna(df['对接人'])
                     opts = [f"{r['ID']} - {r['客户名称']} ({r['显示对接人']})" for i, r in df.iterrows()]
-                    sel = st.selectbox("选择客户", opts)
-                    note = st.text_input("跟进内容")
-                    if st.button("提交跟进"):
-                        uid = int(sel.split(' - ')[0])
-                        update_follow_up(uid, f"[{user_name}]: {note}", str(datetime.date.today()), "跟进中", "中")
-                        st.success("已更新")
-                        st.rerun()
+                    sel = st.selectbox("选择客户", opts, key='fup_sel')
+                    note = st.text_input("本次跟进情况")
+                    next_date = st.date_input("计划下次跟进", datetime.date.today() + datetime.timedelta(days=3))
+                    up_status = st.selectbox("更新进度状态", STATUS_OPTIONS)
+                    up_intent = st.selectbox("更新购买意向", INTENT_OPTIONS)
+
+                    if st.button("提交跟进更新"):
+                        if not sel: st.error("请先选择客户。")
+                        else:
+                            uid = int(sel.split(' - ')[0])
+                            new_log = f"[{datetime.date.today()} {user_name}]: {note}"
+                            update_follow_up(uid, new_log, str(next_date), up_status, up_intent)
+                            st.success("已更新")
+                            st.rerun()
+                else: st.info("暂无客户数据可供跟进。")
             
             st.markdown("---")
             if not df.empty:
@@ -360,15 +352,20 @@ def main():
                 if filter_user != "全部":
                     df_show = df_show[df_show['对接人'] == filter_user]
                 if search:
-                    df_show = df_show[df_show['客户名称'].str.contains(search, na=False) | df_show['联系电话'].str.contains(search, na=False)]
+                    df_show = df_show[df_show['客户名称'].astype(str).str.contains(search, case=False, na=False) | df_show['联系电话'].astype(str).str.contains(search, case=False, na=False)]
                 
-                st.dataframe(df_show, use_container_width=True, hide_index=True)
+                # 隐藏不常用的列
+                cols_to_show = [
+                    'ID', '录入日期', '对接人', '客户名称', '联系电话', '店铺名称', '平方数(㎡)', 
+                    '跟踪进度', '购买意向', '预估总金额(元)', '上次跟进日期', '计划下次跟进', '跟进历史'
+                ]
+                st.dataframe(df_show[[c for c in cols_to_show if c in df_show.columns]], use_container_width=True, hide_index=True)
             
             # 管理员导入
             if role == 'admin':
                 st.markdown("---")
                 with st.expander("🛠️ 管理员导入 (Excel/CSV)"):
-                    up_file = st.file_uploader("上传文件", type=['xlsx', 'csv'])
+                    up_file = st.file_uploader("上传文件", type=['xlsx', 'csv'], key='imp_file')
                     if up_file:
                         if st.button("确认导入"):
                             try:
@@ -379,9 +376,9 @@ def main():
                                     st.success(f"导入成功 {msg} 条")
                                     st.rerun()
                                 else: st.error(msg)
-                            except Exception as e: st.error(f"错误: {e}")
+                            except Exception as e: st.error(f"文件读取错误: {e}")
 
-       # 3. 销售分析 (V10.0 - 修复目标输入和成交逻辑)
+        # 3. 销售分析 (V10.0 - 修复目标输入和成交逻辑)
         elif choice == "📈 销售分析看板":
             st.subheader("📈 核心销售数据分析 (仅统计 [已完结/已收款] 客户)")
             df = get_data(rename_cols=True)
@@ -405,7 +402,6 @@ def main():
                 # 确保数值列是数字类型
                 num_cols = ['预估总金额(元)', '平方数(㎡)', '运费(元)', '施工费(元)', '辅料费(元)']
                 for c in num_cols: 
-                    # 清理并转换数字，无法转换的设为0
                     df[c] = pd.to_numeric(df[c].astype(str).str.replace(r'[^\d\.]', '', regex=True), errors='coerce').fillna(0)
                 
                 # 筛选出已成交数据
@@ -474,21 +470,32 @@ def main():
             dfp = get_promo_data(rename_cols=True)
             
             with st.expander("➕ 录入推广数据"):
-                c1, c2 = st.columns(2)
-                pm = c1.date_input("月份")
-                ps = c1.selectbox("店铺", SHOP_OPTIONS)
-                pt = c1.selectbox("类型", PROMO_TYPE_OPTIONS)
-                cost = c2.number_input("总花费", 0.0)
-                gmv = c2.number_input("成交额", 0.0)
+                col_m, col_s, col_t, col_c, col_g = st.columns(5)
+                pm = col_m.date_input("月份", datetime.date.today(), format="YYYY/MM")
+                ps = col_s.selectbox("店铺", SHOP_OPTIONS)
+                pt = col_t.selectbox("类型", PROMO_TYPE_OPTIONS)
+                cost = col_c.number_input("总花费", 0.0)
+                gmv = col_g.number_input("净成交额", 0.0)
                 
                 if st.button("提交推广数据"):
-                    add_promo_data((str(pm)[:7], ps, pt, cost, 0, gmv, (gmv/cost if cost>0 else 0), 0, 0, 0, 0, ""))
+                    roi = (gmv / cost) if cost > 0 else 0
+                    # 推广数据结构: month, shop, promo_type, total_spend, trans_spend, net_gmv, net_roi, cpa_net, inquiry_count, inquiry_spend, cpl, note
+                    data_tuple = (str(pm)[:7], ps, pt, cost, 0.0, gmv, roi, 0.0, 0, 0.0, 0.0, "")
+                    add_promo_data(data_tuple)
                     st.success("已录入")
                     st.rerun()
             
             if not dfp.empty:
-                st.dataframe(dfp, use_container_width=True)
-                fig = px.bar(dfp, x='月份', y=['总花费(元)', '净成交额(元)'], barmode='group', title="投入产出对比")
+                # 确保计算列是数字
+                dfp['总花费(元)'] = pd.to_numeric(dfp['总花费(元)'], errors='coerce').fillna(0)
+                dfp['净成交额(元)'] = pd.to_numeric(dfp['净成交额(元)'], errors='coerce').fillna(0)
+                dfp['净投产比(ROI)'] = dfp.apply(lambda row: row['净成交额(元)'] / row['总花费(元)'] if row['总花费(元)'] > 0 else 0, axis=1).round(2)
+
+                st.dataframe(dfp, use_container_width=True, hide_index=True)
+                
+                # 推广趋势图
+                dfp_group = dfp.groupby('月份')[['总花费(元)', '净成交额(元)']].sum().reset_index()
+                fig = px.bar(dfp_group, x='月份', y=['总花费(元)', '净成交额(元)'], barmode='group', title="月度投入产出对比")
                 st.plotly_chart(fig, use_container_width=True)
 
 if __name__ == '__main__':
