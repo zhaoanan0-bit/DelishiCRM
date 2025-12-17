@@ -64,7 +64,9 @@ COLUMN_REMAP = {
     '总金额(元)': '预估总金额(元)', '单价(元/平米)': '单价(元/㎡)', '平方数(平米)': '平方数(㎡)',
     '运费(元)': '运费(元)', '施工费(元)': '施工费(元)', '辅料费(元)': '辅料费(元)',
     '单价(元/平)': '单价(元/㎡)', '平方数(平)': '平方数(㎡)',
+    '上次跟进日期': '上次跟进日期', '计划下次跟进': '计划下次跟进', # 确保导入时日期列名正确
 }
+
 
 # --- 数据库连接函数 ---
 @st.cache_resource
@@ -85,6 +87,7 @@ def init_db():
             c.execute("INSERT OR IGNORE INTO users VALUES (?, ?, ?, ?)", (u, d['password'], d['role'], d['display_name']))
     
     # 2. 销售表
+    # 重新审视数据库列定义，确保TEXT字段足够宽，REAL字段用于数值
     c.execute('''CREATE TABLE IF NOT EXISTS sales (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         date TEXT, sales_rep TEXT, customer_name TEXT, phone TEXT, source TEXT, shop_name TEXT,
@@ -103,17 +106,23 @@ def init_db():
     )''')
     conn.commit()
 
-# 安全地将值转换为浮点数，如果失败则返回 0.0 (V11.0 修复)
+# V11.2 增强：安全地将值转换为浮点数，对 None/空字符串/错误格式 返回 0.0
 def get_safe_float(value):
     try:
-        if value is None or str(value).strip() == '':
+        if value is None or (isinstance(value, str) and value.strip() == ''):
             return 0.0
-        cleaned_value = str(value).replace(',', '').replace('¥', '').strip()
+        # 清理常见的非数字字符
+        cleaned_value = str(value).replace(',', '').replace('¥', '').replace('$', '').strip()
+        # 尝试转换
         return float(cleaned_value)
     except:
         return 0.0
 
-# 检查并自动转交客户 (V11.0 保持)
+# V11.2 新增：安全地将值转换为字符串，对 None 返回空字符串
+def get_safe_string(value):
+    return str(value) if value is not None else ''
+
+# 检查并自动转交客户 (保持不变)
 def check_and_transfer_customers(zhaoxiaoan_username):
     conn = get_conn()
     c = conn.cursor()
@@ -163,7 +172,16 @@ def get_data(rename_cols=False):
         num_db_cols = ['unit_price', 'area', 'construction_fee', 'material_fee', 'shipping_fee', 'total_amount']
         for col in num_db_cols:
             if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
+                # V11.2：使用安全转换，将所有非数值转换为 0.0
+                df[col] = df[col].apply(get_safe_float)
+                
+        # 确保所有日期列可以安全转换为日期或 NaT
+        date_cols = ['date', 'last_follow_up_date', 'next_follow_up_date']
+        for col in date_cols:
+            if col in df.columns:
+                 # V11.2：将所有日期字段统一转换为日期对象，错误转为 NaT
+                df[col] = pd.to_datetime(df[col], errors='coerce').dt.date.astype(str).replace({'NaT': None})
+
                 
         if rename_cols: df.rename(columns=CRM_COL_MAP, inplace=True)
         return df
@@ -171,7 +189,7 @@ def get_data(rename_cols=False):
         st.error(f"数据库读取错误: {e}")
         return pd.DataFrame()
 
-# V11.0 修复：使用加固后的 get_safe_float 确保编辑时不崩溃
+# V11.2 修复：在加载单个记录时，强制对数值和字符串进行安全转换
 def get_single_record(record_id):
     conn = get_conn()
     c = conn.cursor()
@@ -184,12 +202,25 @@ def get_single_record(record_id):
         # 强制所有数值字段安全转换为 float/0.0
         num_cols = ['unit_price', 'area', 'construction_fee', 'material_fee', 'shipping_fee', 'total_amount']
         for col in num_cols:
+            # 崩溃修复: 使用 get_safe_float 确保 number_input 接收的是 float
             record_dict[col] = get_safe_float(record_dict.get(col))
+            
+        # 强制所有字符串字段安全转换为 str/空字符串
+        str_cols = ['customer_name', 'phone', 'source', 'shop_name', 'site_type', 'status', 'is_construction', 'purchase_intent', 'follow_up_history', 'sample_no', 'order_no']
+        for col in str_cols:
+             record_dict[col] = get_safe_string(record_dict.get(col))
+             
+        # 日期处理：安全地转换为日期对象或 None
+        date_cols = ['date', 'last_follow_up_date', 'next_follow_up_date']
+        for col in date_cols:
+            date_str = get_safe_string(record_dict.get(col))
+            try:
+                record_dict[col] = pd.to_datetime(date_str, errors='coerce').date() if date_str else datetime.date.today()
+            except:
+                record_dict[col] = datetime.date.today()
             
         return record_dict
     return None
-
-# ... (其他 CRUD 函数保持不变) ...
 
 def add_data(data):
     conn = get_conn()
@@ -201,8 +232,20 @@ def add_data(data):
 def update_data(record_id, data):
     conn = get_conn()
     c = conn.cursor()
+    # 注意：follow_up_history, last_follow_up_date, date 不在常规更新范围内，应单独处理或排除
     update_cols = [col for col in DATABASE_COLUMNS if col not in ['follow_up_history', 'last_follow_up_date']]
     set_clause = ", ".join([f"{col}=?" for col in update_cols])
+    
+    # 强制将所有传入的数值字段转换为 float
+    num_cols = ['unit_price', 'area', 'construction_fee', 'material_fee', 'shipping_fee', 'total_amount']
+    for col in num_cols:
+        data[col] = get_safe_float(data.get(col))
+        
+    # 强制将所有日期字段转换为 string (ISO format)
+    date_cols = ['date', 'next_follow_up_date']
+    for col in date_cols:
+        data[col] = str(data.get(col))
+        
     update_data_tuple = tuple(data[col] for col in update_cols) + (record_id,)
     
     sql = f"UPDATE sales SET {set_clause} WHERE id=?"
@@ -218,12 +261,16 @@ def update_follow_up(record_id, new_log, next_date, new_status, new_intent):
     old_log = old_log_result[0] if old_log_result and old_log_result[0] else ""
     full_new_log = old_log + f"\n[{datetime.date.today()} {st.session_state['display_name']}]: {new_log}"
     
+    # 强制日期为 ISO 格式的字符串
+    today_str = datetime.date.today().isoformat()
+    next_date_str = str(next_date)
+    
     c.execute("""
         UPDATE sales 
         SET follow_up_history = ?, 
             last_follow_up_date = ?, next_follow_up_date = ?, status = ?, purchase_intent = ?
         WHERE id = ?
-    """, (full_new_log.strip(), datetime.date.today().isoformat(), next_date, new_status, new_intent, record_id))
+    """, (full_new_log.strip(), today_str, next_date_str, new_status, new_intent, record_id))
     conn.commit()
 
 def delete_data(record_id):
@@ -231,6 +278,8 @@ def delete_data(record_id):
     c = conn.cursor()
     c.execute("DELETE FROM sales WHERE id=?", (record_id,))
     conn.commit()
+
+# ... (用户信息/推广数据函数保持不变) ...
 
 def get_user_info(username):
     conn = get_conn()
@@ -268,7 +317,7 @@ def add_promo_data(data):
     conn.commit()
 
 
-# 导入功能 (V11.1 保持 V10.9/V11.0 的健壮性)
+# 导入功能 (V11.2 修复：确保所有缺失字段安全填充，防止错位和乱码)
 def import_data_from_excel(df_imported):
     conn = get_conn()
     c = conn.cursor()
@@ -283,33 +332,40 @@ def import_data_from_excel(df_imported):
 
     df_to_save = df_imported.copy()
     
-    # V11.1: 补全缺失列并设定默认值
+    # V11.2: 补全缺失列并设定默认值/类型
     for cn_col, en_col in CN_TO_EN_MAP.items():
         if cn_col not in df_to_save.columns:
             if en_col in ['unit_price', 'area', 'construction_fee', 'material_fee', 'shipping_fee', 'total_amount']:
-                df_to_save[cn_col] = 0.0
+                df_to_save[cn_col] = 0.0 # 数值默认 0.0
+            elif en_col in ['date', 'last_follow_up_date', 'next_follow_up_date']:
+                 df_to_save[cn_col] = datetime.date.today().isoformat() # 日期默认今天
             else:
-                df_to_save[cn_col] = ''
+                df_to_save[cn_col] = '' # 字符串默认空
             
+    # 将中文列名转换为数据库的英文列名
     df_to_save.rename(columns=CN_TO_EN_MAP, inplace=True)
     
     # 格式转换 (终极清洗)
     num_cols = ['unit_price', 'area', 'construction_fee', 'material_fee', 'shipping_fee'] 
     
     for col in num_cols:
-        df_to_save[col] = df_to_save[col].astype(str).str.replace(r'[^\d\.]', '', regex=True)
-        df_to_save[col] = pd.to_numeric(df_to_save[col], errors='coerce').fillna(0.0) 
+        # V11.2: 强制使用 get_safe_float 清洗，解决导入的数字格式问题
+        df_to_save[col] = df_to_save[col].apply(get_safe_float)
         
+    # V11.2: 对接人映射和默认值
     df_to_save['sales_rep'] = df_to_save['sales_rep'].astype(str).apply(lambda x: user_map_rev.get(x.strip(), 'admin'))
     
-    # V11.1: 日期字段处理 - 确保有默认值
+    # V11.2: 日期字段处理 - 确保为 ISO 格式的字符串
     today = datetime.date.today().isoformat()
-    df_to_save['date'] = pd.to_datetime(df_to_save['date'], errors='coerce').dt.date.astype(str).replace({'NaT': today})
-    
-    # 如果上次跟进/计划下次跟进缺失，则使用录入日期
-    df_to_save['last_follow_up_date'] = pd.to_datetime(df_to_save['last_follow_up_date'], errors='coerce').dt.date.astype(str).fillna(df_to_save['date'])
-    df_to_save['next_follow_up_date'] = pd.to_datetime(df_to_save['next_follow_up_date'], errors='coerce').dt.date.astype(str).fillna(df_to_save['date'])
+    date_cols = ['date', 'last_follow_up_date', 'next_follow_up_date']
+    for col in date_cols:
+        df_to_save[col] = pd.to_datetime(df_to_save[col], errors='coerce').dt.date.astype(str).replace({'NaT': today})
 
+    # V11.2: 字符串字段清洗 - 确保没有 None
+    str_cols = ['customer_name', 'phone', 'source', 'shop_name', 'site_type', 'status', 'is_construction', 'purchase_intent', 'follow_up_history', 'sample_no', 'order_no']
+    for col in str_cols:
+        df_to_save[col] = df_to_save[col].astype(str).replace({'None': ''}).fillna('')
+        
     # 写入
     data_tuples = []
     for _, row in df_to_save.iterrows():
@@ -323,6 +379,7 @@ def import_data_from_excel(df_imported):
         row['total_amount'] = calculated_total_amount
 
         # 确保所有列都有值，且顺序正确
+        # 这里必须严格按照 DATABASE_COLUMNS 的顺序取值
         tup = tuple(row.get(c, '') for c in DATABASE_COLUMNS)
         data_tuples.append(tup)
         
@@ -334,8 +391,9 @@ def import_data_from_excel(df_imported):
     except Exception as e:
         return False, str(e)
 
+# ... (模板创建函数保持不变) ...
+
 def create_import_template():
-    # ... (模板创建函数保持不变) ...
     ordered_cols = [
         '录入日期', '对接人', '客户名称', '联系电话', '客户来源', '店铺名称', 
         '单价(元/㎡)', '平方数(㎡)', 
@@ -396,11 +454,12 @@ def check_password():
         return False
     return True
 
-# --- 提醒和转交逻辑 (V11.1 修复日期比较崩溃) ---
+# --- 提醒和转交逻辑 (V11.2 修复日期比较崩溃) ---
 def display_reminders(df, current_user_username, user_map):
     today = datetime.date.today()
     
-    # V11.1 修复：使用 errors='coerce' 将无效日期转为 NaT，避免比较时崩溃
+    # V11.2 修复：使用 errors='coerce' 将无效日期转为 NaT，并确保它们是日期对象以便比较
+    # 注意：df['计划下次跟进'] 在 get_data 中已经是 ISO 格式的字符串或 None
     df['next_follow_up_date_dt'] = pd.to_datetime(df['计划下次跟进'], errors='coerce').dt.date
     
     # 1. 筛选当前用户的客户
@@ -413,16 +472,17 @@ def display_reminders(df, current_user_username, user_map):
         df_filtered = df.copy() 
 
     # 2. 找出超期客户 (今天 > 计划下次跟进日期)
+    # 比较时必须使用 NaT.isna() 来处理无效日期，然后与 today 比较
     df_overdue = df_filtered[
         (df_filtered['next_follow_up_date_dt'].notna()) & 
         (df_filtered['next_follow_up_date_dt'] < today)
     ].sort_values('next_follow_up_date_dt')
 
     # 3. 找出未设置下次跟进的客户 (首次录入后未跟进)
-    # 这里的逻辑是：如果 '计划下次跟进' 是空值，或者与 '录入日期' 相同，则认为没有明确设置新的跟进计划。
+    # next_follow_up_date_dt 为 None (即导入或录入时没有有效日期) 或 next_follow_up_date_dt 与 录入日期 相同
     df_no_fup = df_filtered[
         (df_filtered['next_follow_up_date_dt'].isna()) | 
-        (df_filtered['计划下次跟进'] == df_filtered['录入日期']) # 针对首次导入/录入时默认值的情况
+        (df_filtered['计划下次跟进'].astype(str) == df_filtered['录入日期'].astype(str)) # 使用字符串比较，更安全
     ]
 
     # 4. 汇总提醒
@@ -486,13 +546,13 @@ def main():
                 
                 shop = c2.selectbox("店铺", SHOP_OPTIONS)
                 site = c2.selectbox("场地", SITE_OPTIONS)
-                price = c2.number_input("单价(元/㎡)", 0.0) 
-                area = c2.number_input("平方数(㎡)", 0.0) 
+                price = c2.number_input("单价(元/㎡)", 0.0, key='add_price') 
+                area = c2.number_input("平方数(㎡)", 0.0, key='add_area') 
                 
                 is_const = c3.selectbox("是否施工", ["否", "是"])
-                fee1 = c3.number_input("施工费(元)", 0.0) 
-                fee2 = c3.number_input("辅料费(元)", 0.0) 
-                fee3 = c3.number_input("运费(元) (独立计算)", 0.0) 
+                fee1 = c3.number_input("施工费(元)", 0.0, key='add_fee1') 
+                fee2 = c3.number_input("辅料费(元)", 0.0, key='add_fee2') 
+                fee3 = c3.number_input("运费(元) (独立计算)", 0.0, key='add_fee3') 
                 
                 total = (price * area) + fee1 + fee2 
                 st.info(f"⚡️ 预估总金额 (不含运费，用于报表): ¥{total:,.2f}")
@@ -512,10 +572,14 @@ def main():
                         st.error("请输入客户名称")
                     else:
                         log_entry = f"[{datetime.date.today()} {user_name}]: 首次录入。{remark}"
+                        
+                        # V11.2: 强制所有字段为数据库要求的类型
                         data = (
                             str(date_val), current_user_username, name, phone, source, shop,
-                            float(price), float(area), site, status, is_const, float(fee1), float(fee2), float(fee3), intent, float(total),
-                            log_entry, sample_no, order_no, str(date_val), str(next_fup) 
+                            get_safe_float(price), get_safe_float(area), site, status, is_const, 
+                            get_safe_float(fee1), get_safe_float(fee2), get_safe_float(fee3), intent, 
+                            get_safe_float(total), log_entry, sample_no, order_no, 
+                            str(date_val), str(next_fup) 
                         )
                         add_data(data)
                         st.success("录入成功！")
@@ -526,19 +590,19 @@ def main():
             st.subheader("📋 客户列表")
             df = get_data(rename_cols=True)
             
-            # V11.1: 在数据加载后立即执行自动转交检查
+            # V11.2: 在数据加载后立即执行自动转交检查
             if 'transfer_check_done' not in st.session_state:
-                # 'zhaoxiaoan' 的 username 固定为 'zhaoxiaoan'
                 zhaoxiaoan_username = 'zhaoxiaoan' 
                 transferred_count = check_and_transfer_customers(zhaoxiaoan_username)
                 st.session_state['transfer_check_done'] = True 
                 if transferred_count > 0:
-                    st.rerun() # 转交后刷新数据
+                    st.rerun() 
 
             
             if not df.empty:
                 # 将内部的 sales_rep (username) 转换为 display_name
                 df['对接人'] = df['对接人'].map(user_map).fillna(df['对接人'])
+                # V11.2： display_reminders 修复了崩溃问题
                 display_reminders(df, current_user_username, user_map) 
 
             # 快速跟进
@@ -546,7 +610,6 @@ def main():
                 if not df.empty:
                     
                     if role == 'user':
-                        # 注意：这里需要用 display_name 来筛选df
                         df_user_filtered = df[df['对接人'] == user_name].copy()
                         opts = [f"{r['ID']} - {r['客户名称']} ({r['对接人']})" for i, r in df_user_filtered.iterrows()]
                     else:
@@ -568,7 +631,7 @@ def main():
                             uid = int(sel.split(' - ')[0])
                             update_follow_up(uid, note, str(next_date), up_status, up_intent)
                             st.success("已更新")
-                            st.session_state['transfer_check_done'] = False # 跟进后重置检查
+                            st.session_state['transfer_check_done'] = False 
                             st.rerun()
                 else: st.info("暂无客户数据可供跟进。")
             
@@ -596,11 +659,12 @@ def main():
                 ]
                 
                 # 格式化金额，确保显示
-                df_show['预估总金额(元)'] = df_show['预估总金额(元)'].apply(lambda x: f"¥{x:,.0f}")
-                df_show['运费(元)'] = df_show['运费(元)'].apply(lambda x: f"¥{x:,.0f}")
-                df_show['施工费(元)'] = df_show['施工费(元)'].apply(lambda x: f"¥{x:,.0f}")
-                df_show['辅料费(元)'] = df_show['辅料费(元)'].apply(lambda x: f"¥{x:,.0f}")
+                df_show['预估总金额(元)'] = df_show['预估总金额(元)'].apply(lambda x: f"¥{get_safe_float(x):,.0f}")
+                df_show['运费(元)'] = df_show['运费(元)'].apply(lambda x: f"¥{get_safe_float(x):,.0f}")
+                df_show['施工费(元)'] = df_show['施工费(元)'].apply(lambda x: f"¥{get_safe_float(x):,.0f}")
+                df_show['辅料费(元)'] = df_show['辅料费(元)'].apply(lambda x: f"¥{get_safe_float(x):,.0f}")
 
+                # V11.2: 确保跟进历史等文本字段显示正常 (get_data已处理)
                 
                 st.dataframe(df_show[[c for c in cols_to_show if c in df_show.columns]], use_container_width=True, hide_index=True)
             
@@ -613,6 +677,7 @@ def main():
                     if not df.empty:
                         customer_ids = df['ID'].tolist()
                         edit_id = st.selectbox("选择要编辑或删除的客户ID", customer_ids, key='edit_id_sel')
+                        # V11.2: get_single_record 强制安全类型转换
                         record = get_single_record(edit_id)
                         
                         if record:
@@ -624,7 +689,8 @@ def main():
                                 
                                 c1, c2, c3 = st.columns(3)
                                 # 日期
-                                new_date = c1.date_input("录入日期", pd.to_datetime(record['date']).date())
+                                # V11.2: 日期输入框接收 date 对象
+                                new_date = c1.date_input("录入日期", record['date'])
                                 new_name = c1.text_input("客户名称 (必填)", record['customer_name'])
                                 new_phone = c1.text_input("联系电话", record['phone'])
                                 
@@ -634,13 +700,14 @@ def main():
                                 new_site = c2.selectbox("应用场地", SITE_OPTIONS, index=SITE_OPTIONS.index(record['site_type']) if record['site_type'] in SITE_OPTIONS else 0)
                                 
                                 # 金额和面积
-                                new_area = c3.number_input("平方数(㎡)", record['area'], min_value=0.0)
-                                new_price = c3.number_input("单价(元/㎡)", record['unit_price'], min_value=0.0)
+                                # V11.2: 使用 record['area'] (已经是 float)
+                                new_area = c3.number_input("平方数(㎡)", record['area'], min_value=0.0, key='edit_area')
+                                new_price = c3.number_input("单价(元/㎡)", record['unit_price'], min_value=0.0, key='edit_price')
                                 
                                 # 费用
-                                new_fee1 = st.number_input("施工费(元)", record['construction_fee'], min_value=0.0)
-                                new_fee2 = st.number_input("辅料费(元)", record['material_fee'], min_value=0.0)
-                                new_fee3 = st.number_input("运费(元) (独立计算)", record['shipping_fee'], min_value=0.0)
+                                new_fee1 = st.number_input("施工费(元)", record['construction_fee'], min_value=0.0, key='edit_fee1')
+                                new_fee2 = st.number_input("辅料费(元)", record['material_fee'], min_value=0.0, key='edit_fee2')
+                                new_fee3 = st.number_input("运费(元) (独立计算)", record['shipping_fee'], min_value=0.0, key='edit_fee3')
                                 
                                 st.markdown("---")
                                 
@@ -654,7 +721,8 @@ def main():
                                 # 单号
                                 new_sample_no = c5.text_input("寄样单号", record['sample_no'])
                                 new_order_no = c5.text_input("订单号", record['order_no'])
-                                new_next_fup = c5.date_input("计划下次跟进", pd.to_datetime(record['next_follow_up_date']).date() if record['next_follow_up_date'] else datetime.date.today())
+                                # V11.2: 日期输入框接收 date 对象
+                                new_next_fup = c5.date_input("计划下次跟进", record['next_follow_up_date'])
                                 
                                 # 自动计算总金额 (不含运费)
                                 new_total = (new_price * new_area) + new_fee1 + new_fee2
@@ -666,34 +734,37 @@ def main():
                                     if not new_name:
                                         st.error("客户名称不能为空")
                                     else:
+                                        # V11.2: 强制将所有数据转换为安全类型
                                         updated_data = {
-                                            'date': str(new_date),
+                                            'date': new_date,
                                             'sales_rep': user_map_rev.get(new_rep, new_rep),
                                             'customer_name': new_name,
                                             'phone': new_phone,
                                             'source': record['source'], 
                                             'shop_name': new_shop,
-                                            'unit_price': float(new_price), 
-                                            'area': float(new_area), 
+                                            'unit_price': new_price, 
+                                            'area': new_area, 
                                             'site_type': new_site,
                                             'status': new_status,
                                             'is_construction': new_is_const,
-                                            'construction_fee': float(new_fee1), 
-                                            'material_fee': float(new_fee2), 
-                                            'shipping_fee': float(new_fee3), 
+                                            'construction_fee': new_fee1, 
+                                            'material_fee': new_fee2, 
+                                            'shipping_fee': new_fee3, 
                                             'purchase_intent': new_intent,
-                                            'total_amount': float(new_total), 
+                                            'total_amount': new_total, 
                                             'sample_no': new_sample_no,
                                             'order_no': new_order_no,
-                                            'next_follow_up_date': str(new_next_fup),
+                                            'next_follow_up_date': new_next_fup, # date object
                                         }
                                         update_data(edit_id, updated_data)
                                         st.success(f"客户ID {edit_id} 信息已更新！")
+                                        st.session_state['transfer_check_done'] = False
                                         st.rerun()
                                 
                                 if c_del.button("🗑️ 警告: 删除客户", type="primary"):
                                     delete_data(edit_id)
                                     st.success(f"客户ID {edit_id} 已删除！")
+                                    st.session_state['transfer_check_done'] = False
                                     st.rerun()
 
                     else: st.info("暂无数据可供编辑。")
@@ -719,7 +790,7 @@ def main():
                                 ok, msg = import_data_from_excel(df_i)
                                 if ok: 
                                     st.success(f"导入成功 {msg} 条 (预估总金额已按公式重新计算)")
-                                    st.session_state['transfer_check_done'] = False # 导入新客户后重置检查
+                                    st.session_state['transfer_check_done'] = False 
                                     st.rerun()
                                 else: st.error(f"导入过程中发生致命错误: {msg}")
                             except Exception as e: st.error(f"文件读取错误: {e}")
@@ -750,8 +821,9 @@ def main():
                     
                 else:
                     # 实际成交数据
-                    total_sales = df_sold['预估总金额(元)'].sum()
-                    total_area = df_sold['平方数(㎡)'].sum()
+                    # V11.2：使用安全浮点数确保求和准确
+                    total_sales = df_sold['预估总金额(元)'].apply(get_safe_float).sum()
+                    total_area = df_sold['平方数(㎡)'].apply(get_safe_float).sum()
                     
                     # --- 2. KPI 展示 (基于成交数据和双目标) ---
                     st.markdown("#### ✅ 实际成交关键指标")
@@ -775,7 +847,11 @@ def main():
                                   title="实际成交额 - 店铺占比", hole=.3)
                     c1.plotly_chart(fig1, use_container_width=True)
                     
-                    df_source_sum = df_sold.groupby('客户来源')['预估总金额(元)'].sum().reset_index()
+                    # V11.2：使用清洗后的数值进行图表绘制
+                    df_source_sum = df_sold.copy()
+                    df_source_sum['预估总金额(元)'] = df_source_sum['预估总金额(元)'].apply(get_safe_float)
+                    df_source_sum = df_source_sum.groupby('客户来源')['预估总金额(元)'].sum().reset_index()
+                    
                     fig2 = px.bar(df_source_sum, x='客户来源', y='预估总金额(元)', 
                                   title="实际成交额 - 客户来源", color='客户来源', 
                                   labels={'预估总金额(元)': '成交金额 (元)'})
@@ -788,10 +864,17 @@ def main():
                     df['对接人'] = df['对接人'].map(user_map).fillna(df['对接人'])
                     df_sold['对接人'] = df_sold['对接人'].map(user_map).fillna(df_sold['对接人'])
                     
-                    rank_total_amount = df.groupby('对接人')['预估总金额(元)'].sum().reset_index()
+                    df_all_calc = df.copy()
+                    df_all_calc['预估总金额(元)'] = df_all_calc['预估总金额(元)'].apply(get_safe_float)
+                    
+                    rank_total_amount = df_all_calc.groupby('对接人')['预估总金额(元)'].sum().reset_index()
                     rank_total_amount.rename(columns={'预估总金额(元)': '预估总金额(元) (所有客户)'}, inplace=True)
                     
-                    rank_sold = df_sold.groupby('对接人')[['预估总金额(元)', '平方数(㎡)']].sum().reset_index()
+                    df_sold_calc = df_sold.copy()
+                    df_sold_calc['预估总金额(元)'] = df_sold_calc['预估总金额(元)'].apply(get_safe_float)
+                    df_sold_calc['平方数(㎡)'] = df_sold_calc['平方数(㎡)'].apply(get_safe_float)
+                    
+                    rank_sold = df_sold_calc.groupby('对接人')[['预估总金额(元)', '平方数(㎡)']].sum().reset_index()
                     rank_sold.rename(columns={'预估总金额(元)': '成交总金额', '平方数(㎡)': '成交总面积'}, inplace=True)
                     
                     rank = pd.merge(rank_total_amount, rank_sold, on='对接人', how='outer').fillna(0)
@@ -818,15 +901,18 @@ def main():
                 gmv = col_g.number_input("净成交额", 0.0)
                 
                 if st.button("提交推广数据"):
-                    roi = (gmv / cost) if cost > 0 else 0
-                    data_tuple = (str(pm)[:7], ps, pt, float(cost), 0.0, float(gmv), roi, 0.0, 0, 0.0, 0.0, "")
+                    cost_safe = get_safe_float(cost)
+                    gmv_safe = get_safe_float(gmv)
+                    roi = (gmv_safe / cost_safe) if cost_safe > 0 else 0
+                    data_tuple = (str(pm)[:7], ps, pt, cost_safe, 0.0, gmv_safe, roi, 0.0, 0, 0.0, 0.0, "")
                     add_promo_data(data_tuple)
                     st.success("已录入")
                     st.rerun()
             
             if not dfp.empty:
-                dfp['总花费(元)'] = pd.to_numeric(dfp['总花费(元)'], errors='coerce').fillna(0)
-                dfp['净成交额(元)'] = pd.to_numeric(dfp['净成交额(元)'], errors='coerce').fillna(0)
+                # V11.2：安全转换，确保计算正常
+                dfp['总花费(元)'] = dfp['总花费(元)'].apply(get_safe_float)
+                dfp['净成交额(元)'] = dfp['净成交额(元)'].apply(get_safe_float)
                 dfp['净投产比(ROI)'] = dfp.apply(lambda row: row['净成交额(元)'] / row['总花费(元)'] if row['总花费(元)'] > 0 else 0, axis=1).round(2)
 
                 st.dataframe(dfp, use_container_width=True, hide_index=True)
