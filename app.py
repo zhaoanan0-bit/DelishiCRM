@@ -2,171 +2,165 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import datetime
-import plotly.express as px
-import io
-import os
 
-# --- 1. 核心配置与样式 ---
-st.set_page_config(page_title="CRM全能版", layout="wide")
-DB_FILE = 'crm_data.db'
+# --- 1. 初始化配置 ---
+st.set_page_config(page_title="CRM 增强版", layout="wide")
 
-# 定义选项（确保与您的业务一致）
-SITE_OPTIONS = ["篮球馆", "羽毛球馆", "乒乓球馆", "健身房", "学校体育馆", "其他"]
-SHOP_OPTIONS = ["天猫旗舰店", "拼多多运动店铺", "拼多多旗舰店", "天猫德丽士旗舰店", "淘宝店铺", "抖音店铺", "线下渠道/其他"]
-STATUS_OPTIONS = ["初次接触", "已寄样", "报价中", "合同流程", "已签约", "施工中", "已完结/已收款", "流失/搁置", "样品测试"]
-INTENT_OPTIONS = ["高", "中", "低", "已成交", "流失"]
+# 选项配置
+SALES_REPS = ["范秋菊", "李秋芳", "周梦珂", "赵小安"]
+SHOPS = ["拼多多运动店", "拼多多旗舰店", "天猫旗舰店", "天猫德丽士旗舰店", "淘宝店", "抖店"]
+SOURCES = ["自然进店", "转介绍", "线下渠道"]
+STATUS_LIST = ["初次接触", "方案报价", "样品测试", "价格谈判", "已签约", "已流失"]
 
-# --- 2. 核心修复工具函数 ---
-
-def get_safe_float(value):
-    """【解决无法修改的核心】强制转数字，防止编辑框崩溃"""
-    if value is None or value == "" or str(value).lower() == "nan":
-        return 0.0
-    try:
-        return float(str(value).replace('¥', '').replace(',', '').strip())
-    except:
-        return 0.0
-
-def get_safe_date(value):
-    """【解决乱码的核心】强制转日期，防止提醒功能报错"""
-    if pd.isna(value) or value == "None" or value == "":
-        return None
-    try:
-        return pd.to_datetime(value).date()
-    except:
-        return None
-
-# --- 3. 数据库逻辑 ---
+# --- 2. 数据库与安全转换函数 ---
 
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect('crm_full.db')
     c = conn.cursor()
-    # 销售主表
     c.execute('''CREATE TABLE IF NOT EXISTS sales (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         date TEXT, sales_rep TEXT, customer_name TEXT, phone TEXT, source TEXT, 
         shop_name TEXT, unit_price REAL, area REAL, site_type TEXT, status TEXT, 
         is_construction TEXT, construction_fee REAL, material_fee REAL, 
         shipping_fee REAL, purchase_intent TEXT, total_amount REAL, 
-        follow_up_history TEXT, sample_no TEXT, order_no TEXT, 
-        last_follow_up_date TEXT, next_follow_up_date TEXT
+        follow_up_history TEXT, next_follow_up_date TEXT
     )''')
     conn.commit()
     conn.close()
 
-def get_data():
-    conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql_query("SELECT * FROM sales", conn)
-    conn.close()
-    return df
+def safe_float(val):
+    """【核心修复】防止平方数/单价乱码导致无法修改"""
+    if pd.isna(val) or val == "" or val == "None": return 0.0
+    try: return float(val)
+    except: return 0.0
 
-# --- 4. 页面：录入新客户 ---
+def safe_date_comp(date_str):
+    """【核心修复】防止日期对比报错"""
+    if not date_str or date_str == "None": return None
+    try: return pd.to_datetime(date_str).date()
+    except: return None
 
-def page_add():
-    st.subheader("📝 录入新客户记录")
+# --- 3. 侧边栏登录系统 ---
+
+def login_system():
+    st.sidebar.title("👤 账户登录")
+    user = st.sidebar.selectbox("选择登录人", ["超级管理员"] + SALES_REPS)
+    return user
+
+# --- 4. 功能模块 ---
+
+def show_add_page(current_user):
+    st.header(f"📝 录入新客户记录 (当前: {current_user})")
     with st.form("add_form"):
         c1, c2, c3 = st.columns(3)
         date_in = c1.date_input("录入日期", datetime.date.today())
         cust_name = c1.text_input("客户名称 (必填)")
-        shop = c2.selectbox("店铺名称", SHOP_OPTIONS)
-        site = c2.selectbox("应用场地", SITE_OPTIONS)
-        price = c3.number_input("单价(元/㎡)", min_value=0.0)
-        area = c3.number_input("平方数(㎡)", min_value=0.0)
+        rep = c2.selectbox("对接人", SALES_REPS, index=SALES_REPS.index(current_user) if current_user in SALES_REPS else 0)
+        shop = c2.selectbox("店铺名称", SHOPS)
+        source = c3.selectbox("客户来源", SOURCES)
+        site = c3.selectbox("应用场地", ["篮球馆", "羽毛球馆", "乒乓球", "其他"])
         
-        status = c1.selectbox("跟踪进度", STATUS_OPTIONS)
-        intent = c2.selectbox("购买意向", INTENT_OPTIONS)
-        next_date = c3.date_input("计划下次跟进", datetime.date.today() + datetime.timedelta(days=3))
+        c4, c5, c6 = st.columns(3)
+        price = c4.number_input("单价(元/㎡)", min_value=0.0)
+        area = c5.number_input("平方数(㎡)", min_value=0.0)
+        ship = c6.number_input("运费(元)", min_value=0.0)
         
-        remark = st.text_area("首次沟通记录")
-        submit = st.form_submit_button("提交录入")
+        c7, c8, c9 = st.columns(3)
+        status = c7.selectbox("跟踪进度", STATUS_LIST)
+        is_cons = c8.selectbox("是否施工", ["否", "是"])
+        next_date = c9.date_input("计划下次跟进", datetime.date.today() + datetime.timedelta(days=3))
         
-        if submit and cust_name:
-            conn = sqlite3.connect(DB_FILE)
-            c = conn.cursor()
-            total = price * area
-            c.execute("""INSERT INTO sales (date, customer_name, shop_name, unit_price, area, site_type, status, purchase_intent, next_follow_up_date, follow_up_history, total_amount) 
-                         VALUES (?,?,?,?,?,?,?,?,?,?,?)""", 
-                      (str(date_in), cust_name, shop, price, area, site, status, intent, str(next_date), f"首次录入: {remark}", total))
-            conn.commit()
-            st.success("成功录入！")
+        history = st.text_area("跟进记录/备注")
+        
+        if st.form_submit_button("确认录入数据"):
+            if not cust_name:
+                st.error("请输入客户名称")
+            else:
+                conn = sqlite3.connect('crm_full.db')
+                c = conn.cursor()
+                total = (price * area) + ship
+                c.execute("""INSERT INTO sales (date, sales_rep, customer_name, source, shop_name, unit_price, area, site_type, status, is_construction, shipping_fee, total_amount, follow_up_history, next_follow_up_date) 
+                             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", 
+                          (str(date_in), rep, cust_name, source, shop, price, area, site, status, is_cons, ship, total, history, str(next_date)))
+                conn.commit()
+                st.success("数据录入成功！")
 
-# --- 5. 页面：数据追踪 (修复乱码与编辑) ---
+def show_view_page(user):
+    st.header("📊 数据追踪与跟进")
+    conn = sqlite3.connect('crm_full.db')
+    df = pd.read_sql_query("SELECT * FROM sales", conn)
+    conn.close()
 
-def page_view():
-    st.subheader("📊 客户列表与追踪")
-    df = get_data()
     if df.empty:
-        st.info("暂无数据"); return
+        st.info("目前没有数据"); return
 
-    # --- 逾期提醒 (修复日期对比报错) ---
+    # 1. 逾期提醒逻辑 (修复乱码报错)
     today = datetime.date.today()
-    df['next_dt'] = df['next_follow_up_date'].apply(get_safe_date)
+    df['next_dt'] = df['next_follow_up_date'].apply(safe_date_comp)
     overdue = df[df['next_dt'] < today]
     if not overdue.empty:
-        st.error(f"⚠️ 发现 {len(overdue)} 条逾期未跟进记录！")
+        st.warning(f"🔔 提醒：有 {len(overdue)} 条记录已逾期，请及时跟进！")
 
-    # 数据展示
-    st.dataframe(df, use_container_width=True)
+    # 2. 数据表格
+    st.dataframe(df.drop(columns=['next_dt']), use_container_width=True)
 
-    # --- 管理员编辑区 (修复无法修改的问题) ---
-    st.markdown("---")
-    st.subheader("🛠️ 管理员编辑/修改信息")
-    edit_id = st.number_input("输入要修改的 ID", min_value=1, step=1)
+    # 3. 编辑区 (恢复所有字段)
+    if user == "超级管理员" or st.checkbox("开启编辑模式"):
+        st.markdown("---")
+        st.subheader("🛠️ 管理员编辑/修改")
+        edit_id = st.number_input("输入要修改的 ID", min_value=1, step=1)
+        row = df[df['id'] == edit_id]
+        
+        if not row.empty:
+            record = row.iloc[0]
+            with st.form("edit_full_form"):
+                c1, c2, c3 = st.columns(3)
+                # 使用 safe_float 解决报错核心
+                new_price = c1.number_input("单价", value=safe_float(record['unit_price']))
+                new_area = c2.number_input("平方数", value=safe_float(record['area']))
+                new_status = c3.selectbox("进度", STATUS_LIST, index=STATUS_LIST.index(record['status']) if record['status'] in STATUS_LIST else 0)
+                
+                # 必须有这个按钮
+                if st.form_submit_button("保存修改"):
+                    conn = sqlite3.connect('crm_full.db')
+                    c = conn.cursor()
+                    new_total = (new_price * new_area) + safe_float(record['shipping_fee'])
+                    c.execute("UPDATE sales SET unit_price=?, area=?, status=?, total_amount=? WHERE id=?", 
+                              (new_price, new_area, new_status, new_total, edit_id))
+                    conn.commit()
+                    st.success(f"ID {edit_id} 已更新！")
+                    st.rerun()
+
+def show_analysis_page():
+    st.header("📈 销售分析看板 (增强版)")
+    conn = sqlite3.connect('crm_full.db')
+    df = pd.read_sql_query("SELECT * FROM sales", conn)
+    conn.close()
     
-    # 获取该行数据
-    row = df[df['id'] == edit_id]
-    if not row.empty:
-        record = row.iloc[0].to_dict()
-        with st.form("edit_form_final"):
-            st.write(f"正在修改 ID: {edit_id} - {record['customer_name']}")
-            c1, c2 = st.columns(2)
-            
-            # 使用 get_safe_float 解决无法修改的问题
-            new_price = c1.number_input("单价(元/㎡)", value=get_safe_float(record.get('unit_price')))
-            new_area = c2.number_input("平方数(㎡)", value=get_safe_float(record.get('area')))
-            
-            new_status = c1.selectbox("跟踪进度", STATUS_OPTIONS, index=STATUS_OPTIONS.index(record['status']) if record['status'] in STATUS_OPTIONS else 0)
-            new_intent = c2.selectbox("购买意向", INTENT_OPTIONS, index=INTENT_OPTIONS.index(record['purchase_intent']) if record['purchase_intent'] in INTENT_OPTIONS else 0)
-            
-            # 必须有这个按钮
-            if st.form_submit_button("保存修改内容"):
-                conn = sqlite3.connect(DB_FILE)
-                c = conn.cursor()
-                new_total = new_price * new_area
-                c.execute("UPDATE sales SET unit_price=?, area=?, status=?, purchase_intent=?, total_amount=? WHERE id=?", 
-                          (new_price, new_area, new_status, new_intent, new_total, edit_id))
-                conn.commit()
-                st.success("修改成功！")
-                st.rerun()
-
-# --- 6. 页面：分析看板 ---
-
-def page_analysis():
-    st.subheader("📈 销售分析看板")
-    df = get_data()
     if df.empty: return
 
-    # 简单统计
-    c1, c2, c3 = st.columns(3)
-    c1.metric("总客户数", len(df))
-    c2.metric("已签约数", len(df[df['status']=='已签约']))
-    c3.metric("预估总金额", f"¥{df['total_amount'].sum():,.2f}")
+    # 对接人业绩
+    st.subheader("1. 对接人业绩统计")
+    rep_stats = df.groupby('sales_rep').agg({'id':'count', 'total_amount':'sum'}).rename(columns={'id':'项目数','total_amount':'总金额'})
+    st.table(rep_stats)
 
-    # 仿 Excel 截图的店铺分析
-    st.markdown("#### 店铺渠道转化统计")
-    shop_stats = df.groupby('shop_name').agg({'id':'count', 'total_amount':'sum'}).reset_index()
-    st.table(shop_stats)
+    # 店铺转化
+    st.subheader("2. 店铺渠道转化统计")
+    shop_stats = df.groupby('shop_name').size().reset_index(name='项目数量')
+    st.bar_chart(shop_stats.set_index('shop_name'))
 
-# --- 7. 主程序 ---
+# --- 5. 主程序 ---
 
 def main():
     init_db()
-    st.sidebar.title("CRM管理系统")
-    menu = st.sidebar.radio("功能导航", ["新增销售记录", "数据追踪与查看", "销售分析看板"])
+    current_user = login_system()
     
-    if menu == "新增销售记录": page_add()
-    elif menu == "数据追踪与查看": page_view()
-    elif menu == "销售分析看板": page_analysis()
+    st.sidebar.markdown("---")
+    menu = st.sidebar.radio("菜单", ["📝 新增销售记录", "📊 数据追踪与查看", "📈 销售分析看板"])
+    
+    if menu == "📝 新增销售记录": show_add_page(current_user)
+    elif menu == "📊 数据追踪与查看": show_view_page(current_user)
+    elif menu == "📈 销售分析看板": show_analysis_page()
 
 if __name__ == "__main__":
     main()
